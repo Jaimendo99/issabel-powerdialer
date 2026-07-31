@@ -38,6 +38,8 @@ La cuenta web de ejecución debe tener únicamente `SELECT`, `INSERT`, `UPDATE` 
 `SELECT` sobre las columnas/tablas verificadas. Guardar sus claves fuera del web
 root en `/etc/issabel/gestion_clientes.conf.php`, `root:<grupo-web>` y `0640`.
 Guardar el secreto AMI separado, también fuera del web root y con `0640`.
+Crear `/var/lib/asterisk/gestion_clientes/uploads` con propietario del proceso
+web (`asterisk` en la instalación validada) y permisos `0700`.
 
 ## Menú y ACL
 

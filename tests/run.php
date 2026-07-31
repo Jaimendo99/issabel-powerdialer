@@ -45,6 +45,12 @@ test_case('phone normalization accepts local digits', function () {
     assert_same('+593991234567', GestionClientesValidator::normalizePhone('099 123 4567'), 'Ecuador local numbers must be converted to E.164');
 });
 
+test_case('Ecuador E.164 numbers use national format for Issabel outbound routes', function () {
+    gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
+    assert_same('0959599146', GestionClientesValidator::toDialString('+593959599146'), 'Ecuador country code must be converted back to the national zero prefix');
+    assert_same('0959599146', GestionClientesValidator::toDialString('0959599146'), 'Already-national numbers must retain their route-compatible format');
+});
+
 test_case('phone normalization rejects unsafe values', function () {
     gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
     assert_invalid_result(GestionClientesValidator::normalizePhone('555-CALL-NOW'), 'Alphabetic dial strings must be rejected');

@@ -122,7 +122,11 @@ class GestionClientesWorkflow
         if ($attempt['technical_state'] !== 'CREATED') {
             return $attempt;
         }
-        $dialNumber = ltrim($attempt['normalized_value'], '+');
+        $dialNumber = GestionClientesValidator::toDialString($attempt['normalized_value']);
+        if ($dialNumber === false) {
+            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'INVALID_DIAL_NUMBER\' WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            throw new RuntimeException('PHONE_NOT_ELIGIBLE');
+        }
         try {
             $result = $this->dialer->originate($attempt['agent_sip_extension'], $dialNumber, $attempt['correlation_token'], $attempt['cdr_accountcode']);
             $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));

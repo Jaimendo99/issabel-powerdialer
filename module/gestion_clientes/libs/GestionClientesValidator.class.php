@@ -34,6 +34,17 @@ class GestionClientesValidator
         return $length >= 8 && $length <= 15 ? $normalized : null;
     }
 
+    /** Convert stored E.164 Ecuador numbers to the national format used by Issabel routes. */
+    public static function toDialString($value)
+    {
+        $normalized = self::normalizePhone($value);
+        if ($normalized === false) return false;
+        if (strpos($normalized, '+593') === 0) {
+            return '0' . substr($normalized, 4);
+        }
+        return ltrim($normalized, '+');
+    }
+
     public static function validateCampaign($values)
     {
         $errors = array();

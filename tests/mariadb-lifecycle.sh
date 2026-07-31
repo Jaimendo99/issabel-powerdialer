@@ -87,6 +87,10 @@ assert_query "CDR retry scheduling columns exist" \
   "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='gestion_clientes' AND TABLE_NAME='gc_attempt' AND COLUMN_NAME IN ('cdr_retry_count','cdr_next_retry_at')" "2"
 assert_query "agent extension has bounded VARCHAR storage" \
   "SELECT CONCAT(DATA_TYPE,':',CHARACTER_MAXIMUM_LENGTH) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='gestion_clientes' AND TABLE_NAME='gc_attempt' AND COLUMN_NAME='agent_sip_extension'" "varchar:20"
+assert_query "permanent agent extension is optional" \
+  "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='gestion_clientes' AND TABLE_NAME='gc_agent_map' AND COLUMN_NAME='sip_extension'" "YES"
+assert_query "stable Issabel user identity index exists once" \
+  "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='gestion_clientes' AND TABLE_NAME='gc_agent_map' AND INDEX_NAME='uq_gc_agent_issabel_user'" "1"
 assert_query "work-session attempt index exists once" \
   "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='gestion_clientes' AND TABLE_NAME='gc_attempt' AND INDEX_NAME='idx_gc_attempt_work_session'" "1"
 assert_query "work-session attempt foreign key exists once" \
@@ -99,6 +103,6 @@ assert_query "callback seed retains callback requirement" \
   "SELECT CONCAT(resulting_client_state,':',requires_callback) FROM gc_outcome WHERE campaign_id IS NULL AND code='CALLBACK'" "CALLBACK:1"
 
 assert_query "schema ledger records every migration" \
-  "SELECT GROUP_CONCAT(version_num ORDER BY version_num SEPARATOR ',') FROM gc_schema_version" "1,2,3"
+  "SELECT GROUP_CONCAT(version_num ORDER BY version_num SEPARATOR ',') FROM gc_schema_version" "1,2,3,4"
 
 echo "MariaDB fresh-install and repeat-migration lifecycle passed with $IMAGE."

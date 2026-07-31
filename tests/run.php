@@ -263,6 +263,43 @@ test_case('workspace renders one prominent call action bound to each phone id', 
     assert_true(strpos($javascript, 'form.serialize()') !== false, 'AJAX call submission must serialize only the clicked phone form');
 });
 
+test_case('agent access is independent from permanent SIP extension', function () {
+    $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_mapping.tpl');
+    assert_true(stripos($template, 'sip_extension') === false && stripos($template, 'Extensión SIP') === false, 'Agent access UI must neither show nor request a permanent SIP extension');
+    assert_true(!preg_match('/<input\b[^>]*name=[\'\"]sip_extension[\'\"][^>]*required/i', $template), 'Permanent extension must not be required to grant agent access');
+    assert_true((bool) preg_match('/sip_extension\s+VARCHAR\([0-9]+\)\s+(NULL|NOT NULL\s+DEFAULT\s+[\'\"]{2})/i', $schema), 'Fresh schema must permit an agent identity without a permanent extension');
+});
+
+test_case('agent access activation is idempotent and preserves stable identity', function () {
+    $admin = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesAdmin.class.php');
+    assert_true((bool) preg_match('/function\s+[^\s(]*(agent|access)[^\s(]*(activate|access|status|enabled)|function\s+[^\s(]*(activate|access|status|enabled)[^\s(]*(agent|access)/i', $admin), 'Admin service must expose a dedicated agent-access operation');
+    assert_true((bool) preg_match('/SELECT[\s\S]{0,400}FROM gc_agent_map[\s\S]{0,300}issabel_username=\?/i', $admin), 'Activation must look up and reuse the stable agent identity');
+    assert_true((bool) preg_match('/UPDATE gc_agent_map SET[\s\S]{0,300}active=\?/i', $admin), 'Activation/deactivation must update access status in place');
+    assert_true(!preg_match('/DELETE\s+FROM\s+gc_agent_map/i', $admin), 'Agent access changes must never delete identity, assignments, or history');
+});
+
+test_case('agent access deactivation is blocked by active attempts', function () {
+    $admin = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesAdmin.class.php');
+    assert_true((bool) preg_match('/gc_attempt[\s\S]{0,500}(CREATED|ORIGINATED|RINGING|ANSWERED)/i', $admin), 'Deactivation must check technical attempts that are still active');
+    assert_true((bool) preg_match('/AGENT[^\'\"]*ACTIVE[^\'\"]*(ATTEMPT|CALL)|(ATTEMPT|CALL)[^\'\"]*ACTIVE[^\'\"]*AGENT/i', $admin), 'Active-attempt deactivation must return a specific domain error');
+});
+
+test_case('agent access UI lists Issabel users and uses guarded POST buttons', function () {
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_mapping.tpl');
+    assert_true((bool) preg_match('/agent_mapping[\s\S]{0,1800}[\'\"]users[\'\"]\s*=>|agent_mapping[\s\S]{0,1800}agentAccessUsers/i', $index), 'Agent access page must receive a list of existing Issabel users');
+    $listed = preg_match('/\{foreach\s+from=\$(users|issabel_users)[^}]*\}(.*?)\{\/foreach\}/is', $template, $parts);
+    assert_true($listed === 1, 'Agent access UI must render the Issabel user list');
+    $userBlock = $parts[2];
+    assert_true((bool) preg_match('/<form\b[^>]*method=[\'\"]post[\'\"][^>]*>/i', $userBlock), 'Each user activation/deactivation control must submit a POST form');
+    assert_true((bool) preg_match('/<input\b[^>]*name=[\'\"]csrf_token[\'\"][^>]*>/i', $userBlock), 'Every user access mutation form must carry a CSRF token');
+    assert_true((bool) preg_match('/<input\b[^>]*name=[\'\"]idempotency_key[\'\"][^>]*>/i', $userBlock), 'Every user access mutation form must carry an idempotency key');
+    assert_true((bool) preg_match('/<input\b[^>]*name=[\'\"]issabel_username[\'\"][^>]*>/i', $userBlock), 'Each mutation must identify the listed Issabel user server-side');
+    assert_true((bool) preg_match('/<button\b[^>]*type=[\'\"]submit[\'\"]/i', $userBlock), 'Each listed user must have an explicit activation/deactivation submit button');
+    assert_true(strpos($index, 'validateMutation') !== false && strpos($index, 'gc_once') !== false, 'Access mutations must use POST/CSRF and idempotency guards');
+});
+
 foreach ($tests as $name => $callback) {
     try {
         call_user_func($callback);

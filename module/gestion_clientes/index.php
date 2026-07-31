@@ -43,7 +43,7 @@ function _moduleContent(&$smarty, $module_name)
 
 function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $requestId)
 {
-    $admin = new GestionClientesAdmin($db);
+    $admin = new GestionClientesAdmin($db, $config);
     $base = '?menu=gestion_clientes';
     $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : null;
     $csrf = $auth->csrfToken();
@@ -226,13 +226,22 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
             }
             $preview = array('total' => count($assignment->preview((int)gc_param('campaign_id', 0), (int)gc_param('quantity', 1))));
         }
-        $agents = $db->fetchAll('SELECT id, issabel_username AS name, sip_extension AS extension FROM gc_agent_map WHERE active=1 ORDER BY agent_number', array());
+        $agents = $db->fetchAll('SELECT id, issabel_username AS name FROM gc_agent_map WHERE active=1 ORDER BY issabel_username', array());
         gc_assign($smarty, array('campaigns' => $admin->campaigns('', ''), 'agents' => $agents, 'preview' => $preview, 'csrf_token' => $csrf, 'idempotency_key' => $db->uuid(), 'action_url' => $base . '&action=assignment_preview'));
         return gc_render($smarty, 'assignment.tpl');
     }
     if ($action === 'agent_mapping') {
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') { $auth->validateMutation(gc_param('csrf_token', '')); gc_once($db, $username, 'agent_mapping', gc_param('idempotency_key',''), function () use ($admin) { return $admin->saveAgentMap($_POST); }); }
-        gc_assign($smarty, array('agents' => $db->fetchAll('SELECT * FROM gc_agent_map ORDER BY issabel_username, id', array()), 'csrf_token' => $csrf, 'idempotency_key' => $db->uuid(), 'action_url' => $base . '&action=agent_mapping'));
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $auth->validateMutation(gc_param('csrf_token', ''));
+            $issabelUsername = gc_param('issabel_username', '');
+            $active = gc_param('active', '') === '1';
+            $agentMapId = gc_once($db, $username, 'agent_access', gc_param('idempotency_key',''), function () use ($admin, $issabelUsername, $active) { return $admin->setAgentAccess($issabelUsername, $active); });
+            return gc_redirect_or_json($base . '&action=agent_mapping', $active ? 'AGENT_ACCESS_ENABLED' : 'AGENT_ACCESS_DISABLED', $active ? 'Acceso del agente activado.' : 'Acceso del agente desactivado.', array('id'=>$agentMapId, 'active'=>$active), $requestId);
+        }
+        $accessUsers = $admin->agentAccessList();
+        foreach ($accessUsers as &$accessUser) { $accessUser['idempotency_key'] = $db->uuid(); }
+        unset($accessUser);
+        gc_assign($smarty, array('users' => $accessUsers, 'csrf_token' => $csrf, 'action_url' => $base . '&action=agent_mapping'));
         return gc_render($smarty, 'agent_mapping.tpl');
     }
     if ($action === 'outcome_catalog') {
@@ -272,7 +281,7 @@ function gc_param($name, $default) { return isset($_REQUEST[$name]) && !is_array
 function gc_wants_json() { return gc_param('rawmode','') === 'yes' || strpos(gc_param('action',''), 'api_') === 0; }
 function gc_request_id() { $bytes = function_exists('openssl_random_pseudo_bytes') ? openssl_random_pseudo_bytes(16) : md5(uniqid('', true), true); return bin2hex($bytes); }
 function gc_response($ok,$code,$message,$data,$requestId) { return array('ok'=>(bool)$ok,'code'=>$code,'message'=>$message,'data'=>$data,'request_id'=>$requestId); }
-function gc_message($code) { $messages=array('AUTH_REQUIRED'=>'Debe iniciar sesión en Issabel.','FORBIDDEN'=>'No tiene permiso para esta acción.','CSRF_INVALID'=>'La sesión expiró. Recargue la página.','AGENT_MAPPING_REQUIRED'=>'Su usuario no tiene un mapeo activo.','AMBIGUOUS_AGENT_MAPPING'=>'El usuario tiene más de un mapeo activo.','SEAT_SELECTION_REQUIRED'=>'Seleccione la extensión de este puesto antes de llamar.','SEAT_INVALID'=>'La extensión seleccionada no es válida.','SEAT_LABEL_INVALID'=>'Ingrese un nombre de puesto válido.','SEAT_NOT_ALLOWED'=>'La extensión no está habilitada para Gestión de Clientes.','SEAT_IN_USE'=>'La extensión ya está siendo usada por otro agente.','SEAT_HAS_ACTIVE_CALL'=>'No puede cambiar de extensión durante una llamada activa.','ACTIVE_ATTEMPT_EXISTS'=>'Ya existe una llamada activa. Espere a que finalice.','OUTCOME_REQUIRED_BEFORE_CALL'=>'Guarde el resultado de la llamada anterior antes de iniciar otra.','AMI_RESULT_UNKNOWN'=>'Asterisk recibió la solicitud, pero su estado aún no está confirmado. No vuelva a llamar hasta que se resuelva.','AMI_ORIGINATE_FAILED'=>'Asterisk rechazó la llamada.','INTERNAL_ERROR'=>'Ocurrió un error interno.'); return isset($messages[$code])?$messages[$code]:str_replace('_',' ',strtolower($code)); }
+function gc_message($code) { $messages=array('AUTH_REQUIRED'=>'Debe iniciar sesión en Issabel.','FORBIDDEN'=>'No tiene permiso para esta acción.','CSRF_INVALID'=>'La sesión expiró. Recargue la página.','AGENT_MAPPING_REQUIRED'=>'Su usuario no está habilitado para Gestión de Clientes.','INVALID_ISSABEL_USER'=>'El usuario Issabel no es válido.','ISSABEL_USER_NOT_FOUND'=>'El usuario ya no existe en Issabel.','ISSABEL_USER_SOURCE_UNAVAILABLE'=>'No se pudo leer la lista de usuarios de Issabel.','AMBIGUOUS_AGENT_MAPPING'=>'El usuario tiene más de un registro de acceso activo.','AGENT_HAS_ACTIVE_CALL'=>'No puede desactivar al agente mientras tiene una llamada activa.','SEAT_SELECTION_REQUIRED'=>'Seleccione la extensión de este puesto antes de llamar.','SEAT_INVALID'=>'La extensión seleccionada no es válida.','SEAT_LABEL_INVALID'=>'Ingrese un nombre de puesto válido.','SEAT_NOT_ALLOWED'=>'La extensión no está habilitada para Gestión de Clientes.','SEAT_IN_USE'=>'La extensión ya está siendo usada por otro agente.','SEAT_HAS_ACTIVE_CALL'=>'No puede cambiar de extensión durante una llamada activa.','ACTIVE_ATTEMPT_EXISTS'=>'Ya existe una llamada activa. Espere a que finalice.','OUTCOME_REQUIRED_BEFORE_CALL'=>'Guarde el resultado de la llamada anterior antes de iniciar otra.','AMI_RESULT_UNKNOWN'=>'Asterisk recibió la solicitud, pero su estado aún no está confirmado. No vuelva a llamar hasta que se resuelva.','AMI_ORIGINATE_FAILED'=>'Asterisk rechazó la llamada.','INTERNAL_ERROR'=>'Ocurrió un error interno.'); return isset($messages[$code])?$messages[$code]:str_replace('_',' ',strtolower($code)); }
 function gc_assign(&$smarty,$values) { foreach($values as $key=>$value){ $smarty->assign($key,$value); } }
 function gc_render(&$smarty,$template) { $assets='<link rel="stylesheet" href="modules/gestion_clientes/themes/default/css/gestion_clientes.css" /><script src="modules/gestion_clientes/themes/default/js/gestion_clientes.js"></script>'; return $assets.$smarty->fetch(dirname(__FILE__).'/themes/default/'.$template); }
 function gc_statuses() { return array(array('value'=>'DRAFT','label'=>'Borrador'),array('value'=>'ACTIVE','label'=>'Activa'),array('value'=>'PAUSED','label'=>'Pausada'),array('value'=>'CLOSED','label'=>'Cerrada')); }

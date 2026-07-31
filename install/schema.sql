@@ -85,15 +85,17 @@ CREATE TABLE IF NOT EXISTS gc_client_phone (
 
 CREATE TABLE IF NOT EXISTS gc_agent_map (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  issabel_user_id VARCHAR(80) NULL,
   issabel_username VARCHAR(80) NOT NULL,
   callcenter_agent_id INT NULL,
   agent_number VARCHAR(40) NOT NULL,
-  sip_extension VARCHAR(40) NOT NULL,
+  sip_extension VARCHAR(40) NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   verified_at DATETIME NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (id),
+  UNIQUE KEY uq_gc_agent_issabel_user (issabel_user_id),
   KEY idx_gc_agent_username_active (issabel_username, active),
   KEY idx_gc_agent_number (agent_number),
   KEY idx_gc_agent_extension (sip_extension)

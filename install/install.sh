@@ -48,6 +48,11 @@ if [ "$SKIP_DB" -eq 0 ]; then
     --database=mysql --execute="CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci"
   sed "s/\`gestion_clientes\`/\`$DB_NAME\`/g" "$SCRIPT_DIR/schema.sql" | \
     MYSQL_PWD=${MYSQL_PWD-} mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
+  for GC_MIGRATION in "$SCRIPT_DIR"/migrations/*.sql; do
+    [ -f "$GC_MIGRATION" ] || continue
+    sed "s/\`gestion_clientes\`/\`$DB_NAME\`/g" "$GC_MIGRATION" | \
+      MYSQL_PWD=${MYSQL_PWD-} mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
+  done
   sed "s/\`gestion_clientes\`/\`$DB_NAME\`/g" "$SCRIPT_DIR/seed_outcomes.sql" | \
     MYSQL_PWD=${MYSQL_PWD-} mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
 fi

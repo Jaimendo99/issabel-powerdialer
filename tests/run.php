@@ -126,6 +126,41 @@ test_case('CDR reconciliation supports local timestamps and missing linkedid', f
     assert_true(strpos($source, 'cdr_timezone') !== false && strpos($source, "new DateTimeZone") !== false, 'CDR local time must be converted through a configured timezone');
 });
 
+test_case('dynamic seat keeps permanent agent identity for ownership and statistics', function () {
+    $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $stats = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesStats.class.php');
+    assert_true((bool) preg_match('/CREATE TABLE IF NOT EXISTS gc_attempt[\s\S]*?agent_map_id BIGINT UNSIGNED NOT NULL[\s\S]*?FOREIGN KEY \(agent_map_id\) REFERENCES gc_agent_map\(id\)/', $schema), 'Attempts must retain permanent agent_map_id ownership');
+    assert_true(strpos($workflow, 'agent_map_id=?') !== false, 'Workflow ownership checks must continue using agent_map_id');
+    assert_true(strpos($stats, 'agent_map_id') !== false, 'Agent statistics must continue grouping attempts/assignments by permanent agent identity');
+});
+
+test_case('attempt snapshots the selected session seat before origination', function () {
+    $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    assert_true((bool) preg_match('/gc_attempt[\s\S]*?agent_sip_extension VARCHAR\([0-9]+\)/', $schema), 'gc_attempt must persist the seat extension used for that call');
+    assert_true((bool) preg_match('/function\s+startCall\s*\([^)]*(seat|extension)/i', $workflow), 'startCall must receive a selected seat separately from the permanent agent mapping');
+    assert_true((bool) preg_match('/INSERT INTO gc_attempt\s*\([^)]*agent_sip_extension/i', $workflow), 'The attempt INSERT must snapshot agent_sip_extension in its transaction');
+    assert_true((bool) preg_match('/originate\s*\(\s*\$attempt\s*\[\s*[\'\"]agent_sip_extension[\'\"]\s*\]/', $workflow), 'AMI must originate from the extension snapshotted on the attempt, not mutable agent-map data');
+});
+
+test_case('seat selection is session-scoped and validated server-side', function () {
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    $session = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesSeatSession.class.php');
+    $combined = $index . "\n" . $session;
+    assert_true(strpos($session, 'session_id()') !== false && strpos($session, 'session_hash') !== false, 'Selected seat must be bound server-side to the Issabel PHP session');
+    assert_true((bool) preg_match('/action[^\n]{0,100}(select|set|clear|change)[^\n]{0,60}(seat|extension)|(seat|extension)[^\n]{0,60}(select|set|clear|change)/i', $index), 'A dedicated seat selection endpoint/action is required');
+    assert_true(strpos($index, 'validateMutation') !== false, 'Seat changes must use the standard POST/CSRF/idempotency mutation guard');
+    assert_true((bool) preg_match('/preg_match\s*\([^\n]*(seat|extension)|function\s+[^\s(]*(seat|extension)[^\{]*\{[\s\S]{0,800}preg_match/i', $combined), 'Server-side seat validation must restrict extension syntax');
+});
+
+test_case('call form cannot override the server-side selected seat', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    $matched = preg_match('/<form[^>]*gc-call-form[^>]*>([\s\S]*?)<\/form>/', $template, $parts);
+    assert_true($matched === 1, 'Agent workspace call form is missing');
+    assert_true(!preg_match('/name=[\'\"][^\'\"]*(seat|extension)[^\'\"]*[\'\"]/i', $parts[1]), 'Call requests must not post a seat/extension that can override the server-side session selection');
+});
+
 foreach ($tests as $name => $callback) {
     try {
         call_user_func($callback);

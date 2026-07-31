@@ -12,7 +12,7 @@ agente de Call Center y extensión SIP.
 ```text
 Navegador -> módulo: POST api_start_call (CSRF + idempotency key)
 módulo -> MySQL: bloquea cliente/asignación y crea gc_attempt
-módulo -> AMI local: Originate SIP/<agente>, Local/<teléfono>@gestion-clientes-outbound
+módulo -> AMI local: Originate SIP/<extensión de puesto>, Local/<teléfono>@gestion-clientes-outbound
 Asterisk -> agente: timbra primero
 agente -> Asterisk: contesta
 Asterisk -> from-internal: marca al cliente con GC_ATTEMPT_ID heredado

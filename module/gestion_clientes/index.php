@@ -9,6 +9,7 @@ require_once dirname(__FILE__) . '/libs/GestionClientesDialer.class.php';
 require_once dirname(__FILE__) . '/libs/GestionClientesWorkflow.class.php';
 require_once dirname(__FILE__) . '/libs/GestionClientesStats.class.php';
 require_once dirname(__FILE__) . '/libs/GestionClientesAdmin.class.php';
+require_once dirname(__FILE__) . '/libs/GestionClientesSeatSession.class.php';
 
 function _moduleContent(&$smarty, $module_name)
 {
@@ -46,6 +47,24 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
     $base = '?menu=gestion_clientes';
     $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : null;
     $csrf = $auth->csrfToken();
+    $seatSessions = new GestionClientesSeatSession($db, isset($config['seat_session_ttl_seconds']) ? $config['seat_session_ttl_seconds'] : 43200);
+
+    if ($action === 'seat_select') {
+        $auth->validateMutation(gc_param('csrf_token', ''));
+        $agent = $auth->agentMap(true);
+        gc_once($db, $username, 'seat_select', gc_param('idempotency_key', ''), function () use ($seatSessions, $agent) {
+            return $seatSessions->select($agent['id'], gc_param('sip_extension', ''));
+        });
+        return gc_redirect_or_json($base . '&action=workspace', 'SEAT_SELECTED', 'Extensión seleccionada.', array(), $requestId);
+    }
+    if ($action === 'seat_release') {
+        $auth->validateMutation(gc_param('csrf_token', ''));
+        $agent = $auth->agentMap(true);
+        gc_once($db, $username, 'seat_release', gc_param('idempotency_key', ''), function () use ($seatSessions, $agent) {
+            return $seatSessions->release($agent['id']);
+        });
+        return gc_redirect_or_json($base . '&action=workspace', 'SEAT_RELEASED', 'Extensión liberada.', array(), $requestId);
+    }
 
     if ($action === 'api_claim_next') {
         $auth->validateMutation(gc_param('csrf_token', ''));
@@ -62,8 +81,10 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
     if ($action === 'api_start_call') {
         $auth->validateMutation(gc_param('csrf_token', ''));
         $agent = $auth->agentMap(true);
+        $seat = $seatSessions->current($agent['id'], true);
+        if (!$seat) { throw new RuntimeException('SEAT_SELECTION_REQUIRED'); }
         $workflow = new GestionClientesWorkflow($db, new GestionClientesDialer($config), $config['claim_ttl_seconds']);
-        $attempt = $workflow->startCall($agent, (int)gc_param('client_id', 0), (int)gc_param('phone_id', 0), gc_param('claim_token', ''), gc_param('idempotency_key', ''), $username, $ip);
+        $attempt = $workflow->startCall($agent, $seat['id'], (int)gc_param('client_id', 0), (int)gc_param('phone_id', 0), gc_param('claim_token', ''), gc_param('idempotency_key', ''), $username, $ip);
         return array('_json' => gc_response(true, 'CALL_ACCEPTED', 'Llamada enviada a la extensión.', $attempt, $requestId));
     }
     if ($action === 'api_attempt_status') {
@@ -100,6 +121,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
 
     if ($action === 'workspace') {
         $agent = $auth->agentMap(false);
+        $selectedSeat = $seatSessions->current($agent['id'], true);
         $workflow = new GestionClientesWorkflow($db, new GestionClientesDialer($config), $config['claim_ttl_seconds']);
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $auth->validateMutation(gc_param('csrf_token', ''));
@@ -110,7 +132,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
         $attempt = $client ? $db->fetchOne('SELECT * FROM gc_attempt WHERE client_id=? AND agent_map_id=? ORDER BY id DESC LIMIT 1', array($client['id'], $agent['id'])) : array();
         $campaignId = $client ? $client['campaign_id'] : 0;
         $outcomes = $db->fetchAll('SELECT * FROM gc_outcome WHERE active=1 AND (campaign_id IS NULL OR campaign_id=?) ORDER BY campaign_id DESC, display_order, id', array($campaignId));
-        gc_assign($smarty, array('title' => 'Mi cartera', 'csrf_token' => $csrf, 'agent' => array('name' => $agent['issabel_username'], 'extension' => $agent['sip_extension'], 'mapped' => 1), 'client' => $viewClient, 'attempt' => $attempt, 'outcomes' => $outcomes, 'claim_url' => $base . '&action=workspace', 'start_call_url' => $base . '&action=api_start_call&rawmode=yes', 'save_outcome_url' => $base . '&action=api_save_outcome&rawmode=yes', 'status_url' => $base . '&action=api_attempt_status&rawmode=yes', 'call_idempotency_key' => $db->uuid(), 'outcome_idempotency_key' => $db->uuid(), 'claim_idempotency_key' => $db->uuid(), 'can_disposition' => $attempt && !empty($attempt['ended_at']) ? 1 : 0));
+        gc_assign($smarty, array('title' => 'Mi cartera', 'csrf_token' => $csrf, 'agent' => array('name' => $agent['issabel_username'], 'number' => $agent['agent_number'], 'mapped' => 1), 'seats' => $seatSessions->activeSeats(), 'selected_seat' => $selectedSeat ? $selectedSeat : array(), 'seat_select_url' => $base . '&action=seat_select', 'seat_release_url' => $base . '&action=seat_release', 'seat_idempotency_key' => $db->uuid(), 'seat_release_idempotency_key' => $db->uuid(), 'client' => $viewClient, 'attempt' => $attempt, 'outcomes' => $outcomes, 'claim_url' => $base . '&action=workspace', 'start_call_url' => $base . '&action=api_start_call&rawmode=yes', 'save_outcome_url' => $base . '&action=api_save_outcome&rawmode=yes', 'status_url' => $base . '&action=api_attempt_status&rawmode=yes', 'call_idempotency_key' => $db->uuid(), 'outcome_idempotency_key' => $db->uuid(), 'claim_idempotency_key' => $db->uuid(), 'can_call' => $selectedSeat ? 1 : 0, 'can_disposition' => $attempt && !empty($attempt['ended_at']) ? 1 : 0));
         return gc_render($smarty, 'agent_workspace.tpl');
     }
 
@@ -124,6 +146,23 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
     }
 
     $auth->requireSupervisor();
+
+    if ($action === 'seat_admin') {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $auth->validateMutation(gc_param('csrf_token', ''));
+            $extension = gc_param('sip_extension', '');
+            $label = gc_param('label', '');
+            if (!preg_match('/^[0-9]{1,20}$/', $extension)) throw new RuntimeException('SEAT_INVALID');
+            if ($label === '' || strlen($label) > 80) throw new RuntimeException('SEAT_LABEL_INVALID');
+            $active = gc_param('active', '') === '1' ? 1 : 0;
+            gc_once($db, $username, 'seat_admin', gc_param('idempotency_key', ''), function () use ($db, $extension, $label, $active) {
+                $db->execute('INSERT INTO gc_sip_seat (sip_extension, label, active, created_at, updated_at) VALUES (?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE label=VALUES(label), active=VALUES(active), updated_at=UTC_TIMESTAMP()', array($extension, $label, $active));
+                return array('sip_extension'=>$extension, 'active'=>$active);
+            });
+        }
+        gc_assign($smarty, array('seats'=>$db->fetchAll('SELECT * FROM gc_sip_seat ORDER BY (sip_extension+0), sip_extension', array()), 'csrf_token'=>$csrf, 'idempotency_key'=>$db->uuid(), 'action_url'=>$base.'&action=seat_admin'));
+        return gc_render($smarty, 'seat_admin.tpl');
+    }
 
     if ($action === 'campaign_create' || $action === 'campaign_edit') {
         $campaign = array('timezone' => $config['timezone'], 'outbound_context' => $config['outbound_context'], 'status' => 'DRAFT', 'dialing_mode' => 'MANUAL');
@@ -214,7 +253,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
 
     $campaigns = $admin->campaigns(gc_param('q', ''), gc_param('status', ''));
     foreach ($campaigns as &$campaign) { $campaign['total']=$campaign['client_count']; $campaign['managed']=$db->fetchOne('SELECT COUNT(*) AS n FROM gc_client WHERE campaign_id=? AND terminal=1', array($campaign['id']))['n']; $campaign['progress']=$campaign['total'] ? round(100*$campaign['managed']/$campaign['total'],1).'%' : '0%'; $campaign['edit_url']=$base.'&action=campaign_edit&id='.$campaign['id']; $campaign['workspace_url']=$base.'&action=dashboard&campaign_id='.$campaign['id']; }
-    gc_assign($smarty, array('campaigns'=>$campaigns, 'filters'=>array('q'=>gc_param('q',''),'status'=>gc_param('status','')), 'statuses'=>gc_statuses(), 'create_url'=>$base.'&action=campaign_create', 'import_url'=>$base.'&action=import_upload', 'assignment_url'=>$base.'&action=assignment_preview', 'mapping_url'=>$base.'&action=agent_mapping', 'callbacks_url'=>$base.'&action=callbacks', 'audit_url'=>$base.'&action=audit_view'));
+    gc_assign($smarty, array('campaigns'=>$campaigns, 'filters'=>array('q'=>gc_param('q',''),'status'=>gc_param('status','')), 'statuses'=>gc_statuses(), 'create_url'=>$base.'&action=campaign_create', 'import_url'=>$base.'&action=import_upload', 'assignment_url'=>$base.'&action=assignment_preview', 'mapping_url'=>$base.'&action=agent_mapping', 'seats_url'=>$base.'&action=seat_admin', 'callbacks_url'=>$base.'&action=callbacks', 'audit_url'=>$base.'&action=audit_view'));
     return gc_render($smarty, 'campaign_list.tpl');
 }
 
@@ -222,7 +261,7 @@ function gc_param($name, $default) { return isset($_REQUEST[$name]) && !is_array
 function gc_wants_json() { return gc_param('rawmode','') === 'yes' || strpos(gc_param('action',''), 'api_') === 0; }
 function gc_request_id() { $bytes = function_exists('openssl_random_pseudo_bytes') ? openssl_random_pseudo_bytes(16) : md5(uniqid('', true), true); return bin2hex($bytes); }
 function gc_response($ok,$code,$message,$data,$requestId) { return array('ok'=>(bool)$ok,'code'=>$code,'message'=>$message,'data'=>$data,'request_id'=>$requestId); }
-function gc_message($code) { $messages=array('AUTH_REQUIRED'=>'Debe iniciar sesión en Issabel.','FORBIDDEN'=>'No tiene permiso para esta acción.','CSRF_INVALID'=>'La sesión expiró. Recargue la página.','AGENT_MAPPING_REQUIRED'=>'Su usuario no tiene un mapeo activo.','AMBIGUOUS_AGENT_MAPPING'=>'El usuario tiene más de un mapeo activo.','AMI_ORIGINATE_FAILED'=>'Asterisk rechazó la llamada.','INTERNAL_ERROR'=>'Ocurrió un error interno.'); return isset($messages[$code])?$messages[$code]:str_replace('_',' ',strtolower($code)); }
+function gc_message($code) { $messages=array('AUTH_REQUIRED'=>'Debe iniciar sesión en Issabel.','FORBIDDEN'=>'No tiene permiso para esta acción.','CSRF_INVALID'=>'La sesión expiró. Recargue la página.','AGENT_MAPPING_REQUIRED'=>'Su usuario no tiene un mapeo activo.','AMBIGUOUS_AGENT_MAPPING'=>'El usuario tiene más de un mapeo activo.','SEAT_SELECTION_REQUIRED'=>'Seleccione la extensión de este puesto antes de llamar.','SEAT_INVALID'=>'La extensión seleccionada no es válida.','SEAT_LABEL_INVALID'=>'Ingrese un nombre de puesto válido.','SEAT_NOT_ALLOWED'=>'La extensión no está habilitada para Gestión de Clientes.','SEAT_IN_USE'=>'La extensión ya está siendo usada por otro agente.','SEAT_HAS_ACTIVE_CALL'=>'No puede cambiar de extensión durante una llamada activa.','AMI_ORIGINATE_FAILED'=>'Asterisk rechazó la llamada.','INTERNAL_ERROR'=>'Ocurrió un error interno.'); return isset($messages[$code])?$messages[$code]:str_replace('_',' ',strtolower($code)); }
 function gc_assign(&$smarty,$values) { foreach($values as $key=>$value){ $smarty->assign($key,$value); } }
 function gc_render(&$smarty,$template) { $assets='<link rel="stylesheet" href="modules/gestion_clientes/themes/default/css/gestion_clientes.css" /><script src="modules/gestion_clientes/themes/default/js/gestion_clientes.js"></script>'; return $assets.$smarty->fetch(dirname(__FILE__).'/themes/default/'.$template); }
 function gc_statuses() { return array(array('value'=>'DRAFT','label'=>'Borrador'),array('value'=>'ACTIVE','label'=>'Activa'),array('value'=>'PAUSED','label'=>'Pausada'),array('value'=>'CLOSED','label'=>'Cerrada')); }

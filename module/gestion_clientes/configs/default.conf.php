@@ -6,6 +6,7 @@ $gcConfig = array(
     'db_password' => '',
     'timezone' => 'America/Guayaquil',
     'claim_ttl_seconds' => 900,
+    'seat_session_ttl_seconds' => 43200,
     'upload_dir' => '/var/lib/asterisk/gestion_clientes/uploads',
     'max_upload_bytes' => 10485760,
     'supervisor_users' => array('admin'),

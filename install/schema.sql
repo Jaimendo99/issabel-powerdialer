@@ -99,6 +99,34 @@ CREATE TABLE IF NOT EXISTS gc_agent_map (
   KEY idx_gc_agent_extension (sip_extension)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
+CREATE TABLE IF NOT EXISTS gc_sip_seat (
+  sip_extension VARCHAR(20) NOT NULL,
+  label VARCHAR(80) NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (sip_extension),
+  KEY idx_gc_sip_seat_active (active, sip_extension)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+CREATE TABLE IF NOT EXISTS gc_work_session (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  agent_map_id BIGINT UNSIGNED NOT NULL,
+  session_hash CHAR(64) NOT NULL,
+  sip_extension VARCHAR(20) NOT NULL,
+  active_extension VARCHAR(20) NULL,
+  selected_at DATETIME NOT NULL,
+  last_seen_at DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  released_at DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY idx_gc_work_session_hash (session_hash),
+  UNIQUE KEY uq_gc_active_extension (active_extension),
+  KEY idx_gc_work_session_agent (agent_map_id, expires_at),
+  CONSTRAINT fk_gc_work_session_agent FOREIGN KEY (agent_map_id) REFERENCES gc_agent_map(id),
+  CONSTRAINT fk_gc_work_session_seat FOREIGN KEY (sip_extension) REFERENCES gc_sip_seat(sip_extension)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
 CREATE TABLE IF NOT EXISTS gc_assignment (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   campaign_id BIGINT UNSIGNED NOT NULL,
@@ -159,6 +187,8 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   phone_id BIGINT UNSIGNED NOT NULL,
   assignment_id BIGINT UNSIGNED NOT NULL,
   agent_map_id BIGINT UNSIGNED NOT NULL,
+  work_session_id BIGINT UNSIGNED NULL,
+  agent_sip_extension VARCHAR(20) NULL,
   correlation_token CHAR(36) NOT NULL,
   idempotency_key VARCHAR(100) NOT NULL,
   requested_at DATETIME NOT NULL,
@@ -180,6 +210,7 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   UNIQUE KEY uq_gc_attempt_token (correlation_token),
   UNIQUE KEY uq_gc_attempt_idempotency (agent_map_id, idempotency_key),
   KEY idx_gc_attempt_agent_date (agent_map_id, requested_at, technical_state),
+  KEY idx_gc_attempt_work_session (work_session_id),
   KEY idx_gc_attempt_outcome_date (business_outcome_id, requested_at),
   UNIQUE KEY uq_gc_attempt_cdr_accountcode (cdr_accountcode),
   KEY idx_gc_attempt_unreconciled (reconciled_at, requested_at),
@@ -188,6 +219,7 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   CONSTRAINT fk_gc_attempt_phone FOREIGN KEY (phone_id) REFERENCES gc_client_phone(id),
   CONSTRAINT fk_gc_attempt_assignment FOREIGN KEY (assignment_id) REFERENCES gc_assignment(id),
   CONSTRAINT fk_gc_attempt_agent FOREIGN KEY (agent_map_id) REFERENCES gc_agent_map(id),
+  CONSTRAINT fk_gc_attempt_work_session FOREIGN KEY (work_session_id) REFERENCES gc_work_session(id),
   CONSTRAINT fk_gc_attempt_outcome FOREIGN KEY (business_outcome_id) REFERENCES gc_outcome(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 

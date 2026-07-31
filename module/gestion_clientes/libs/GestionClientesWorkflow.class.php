@@ -56,13 +56,13 @@ class GestionClientesWorkflow
         });
     }
 
-    public function startCall($agent, $clientId, $phoneId, $claimToken, $idempotencyKey, $actor, $ip)
+    public function startCall($agent, $seatSessionId, $clientId, $phoneId, $claimToken, $idempotencyKey, $actor, $ip)
     {
         if (!GestionClientesValidator::safeIdempotencyKey($idempotencyKey)) {
             throw new InvalidArgumentException('INVALID_IDEMPOTENCY_KEY');
         }
         $db = $this->db;
-        $attempt = $db->transaction(function ($tx) use ($agent, $clientId, $phoneId, $claimToken, $idempotencyKey, $actor, $ip) {
+        $attempt = $db->transaction(function ($tx) use ($agent, $seatSessionId, $clientId, $phoneId, $claimToken, $idempotencyKey, $actor, $ip) {
             $existing = $tx->fetchOne('SELECT * FROM gc_attempt WHERE agent_map_id=? AND idempotency_key=?', array($agent['id'], $idempotencyKey));
             if ($existing) {
                 // An accepted AMI request can outlive the PHP request.  Never send it
@@ -89,11 +89,15 @@ class GestionClientesWorkflow
             if (!$agentLock) {
                 throw new RuntimeException('AGENT_MAPPING_REQUIRED');
             }
+            $seat = $tx->fetchOne('SELECT ws.id, ws.sip_extension FROM gc_work_session ws JOIN gc_sip_seat s ON s.sip_extension=ws.sip_extension AND s.active=1 WHERE ws.id=? AND ws.agent_map_id=? AND ws.released_at IS NULL AND ws.expires_at>UTC_TIMESTAMP() FOR UPDATE', array((int)$seatSessionId, $agent['id']));
+            if (!$seat) {
+                throw new RuntimeException('SEAT_SELECTION_REQUIRED');
+            }
             $recent = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND requested_at>DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 SECOND) ORDER BY id DESC LIMIT 1', array($agent['id']));
             if ($recent) {
                 throw new RuntimeException('CALL_RATE_LIMITED');
             }
-            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE assignment_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') LIMIT 1', array($row['assignment_id']));
+            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') LIMIT 1', array($agent['id']));
             if ($active) {
                 throw new RuntimeException('ACTIVE_ATTEMPT_EXISTS');
             }
@@ -102,14 +106,14 @@ class GestionClientesWorkflow
             // UUID in userfield and use a compact, independently indexed accountcode.
             $account = 'GC-' . substr(str_replace('-', '', strtolower($token)), 0, 17);
             $tx->execute(
-                'INSERT INTO gc_attempt (campaign_id, client_id, phone_id, assignment_id, agent_map_id, correlation_token, idempotency_key, requested_at, technical_state, cdr_accountcode) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), \'CREATED\', ?)',
-                array($row['campaign_id'], $clientId, $phoneId, $row['assignment_id'], $agent['id'], $token, $idempotencyKey, $account)
+                'INSERT INTO gc_attempt (campaign_id, client_id, phone_id, assignment_id, agent_map_id, work_session_id, agent_sip_extension, correlation_token, idempotency_key, requested_at, technical_state, cdr_accountcode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), \'CREATED\', ?)',
+                array($row['campaign_id'], $clientId, $phoneId, $row['assignment_id'], $agent['id'], $seat['id'], $seat['sip_extension'], $token, $idempotencyKey, $account)
             );
             $attemptId = $tx->pdo()->lastInsertId();
             $tx->execute('UPDATE gc_client_phone SET state=\'ATTEMPTED\', attempt_count=attempt_count+1, last_attempt_at=UTC_TIMESTAMP() WHERE id=?', array($phoneId));
             $tx->execute('UPDATE gc_client SET last_attempt_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?', array($clientId));
-            $tx->audit($clientId, $actor, 'CALL_REQUESTED', 'IN_PROGRESS', 'IN_PROGRESS', array('attempt_id' => $attemptId, 'phone_id' => $phoneId), $ip);
-            return array('id' => $attemptId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'technical_state' => 'CREATED');
+            $tx->audit($clientId, $actor, 'CALL_REQUESTED', 'IN_PROGRESS', 'IN_PROGRESS', array('attempt_id' => $attemptId, 'phone_id' => $phoneId, 'sip_extension' => $seat['sip_extension']), $ip);
+            return array('id' => $attemptId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'agent_sip_extension' => $seat['sip_extension'], 'technical_state' => 'CREATED');
         });
         if (!empty($attempt['_idempotent_replay'])) {
             unset($attempt['_idempotent_replay']);
@@ -120,7 +124,7 @@ class GestionClientesWorkflow
         }
         $dialNumber = ltrim($attempt['normalized_value'], '+');
         try {
-            $result = $this->dialer->originate($agent['sip_extension'], $dialNumber, $attempt['correlation_token'], $attempt['cdr_accountcode']);
+            $result = $this->dialer->originate($attempt['agent_sip_extension'], $dialNumber, $attempt['correlation_token'], $attempt['cdr_accountcode']);
             $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
             $attempt['technical_state'] = 'ORIGINATED';
             $attempt['ami'] = $result;

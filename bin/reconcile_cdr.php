@@ -45,8 +45,9 @@ try {
 } catch (Exception $e) { fwrite(STDERR, "Database connection failed\n"); exit(1); }
 
 $cutoff = gmdate('Y-m-d H:i:s', time() - $minAge);
-$sql = 'SELECT a.id,a.phone_id,a.cdr_accountcode,p.normalized_value FROM gc_attempt a JOIN gc_client_phone p ON p.id=a.phone_id'
-     . ' WHERE a.reconciled_at IS NULL AND a.requested_at<=? ORDER BY a.id ASC LIMIT ' . $limit;
+$sql = 'SELECT a.id,a.phone_id,a.correlation_token,a.cdr_accountcode,a.cdr_retry_count,p.normalized_value FROM gc_attempt a JOIN gc_client_phone p ON p.id=a.phone_id'
+     . ' WHERE a.reconciled_at IS NULL AND a.requested_at<=? AND (a.cdr_next_retry_at IS NULL OR a.cdr_next_retry_at<=UTC_TIMESTAMP())'
+     . ' ORDER BY COALESCE(a.cdr_next_retry_at,a.requested_at) ASC,a.id ASC LIMIT ' . $limit;
 $q = $db->prepare($sql); $q->execute(array($cutoff)); $attempts = $q->fetchAll();
 $cdrSql = 'SELECT calldate,dst,dcontext,channel,dstchannel,lastapp,lastdata,duration,billsec,disposition,'
         . 'accountcode,uniqueid,userfield,' . $linkedIdSelect . ',recordingfile FROM `' . $cdrTable . '` WHERE accountcode=? OR userfield=? ORDER BY calldate,uniqueid';
@@ -54,12 +55,48 @@ $cdrQ = $cdrDb->prepare($cdrSql);
 $update = $db->prepare('UPDATE gc_attempt SET technical_state=?,asterisk_uniqueid=?,linkedid=?,duration_seconds=?,'
     . 'talk_seconds=?,recording_path=?,raw_error_code=?,answered_at=?,ended_at=?,reconciled_at=UTC_TIMESTAMP() WHERE id=? AND reconciled_at IS NULL');
 $updatePhone = $db->prepare('UPDATE gc_client_phone SET state=? WHERE id=? AND state NOT IN (\'INVALID\',\'DO_NOT_CALL\')');
+$scheduleRetry = $db->prepare('UPDATE gc_attempt SET cdr_retry_count=cdr_retry_count+1,cdr_next_retry_at=DATE_ADD(UTC_TIMESTAMP(),INTERVAL ? SECOND) WHERE id=? AND reconciled_at IS NULL');
 $counts = array('selected' => count($attempts), 'updated' => 0, 'waiting' => 0, 'ambiguous' => 0);
 
+function gc_cdr_retry_delay($retryCount)
+{
+    // 30, 60, 120 seconds and so on, capped at one hour. This keeps each run bounded
+    // while allowing newer eligible attempts to move through the same index.
+    return min(3600, 30 * pow(2, min(7, max(0, (int)$retryCount))));
+}
+
+function gc_cdr_row_key($row)
+{
+    if (!empty($row['uniqueid'])) return 'u:' . $row['uniqueid'];
+    return 'r:' . md5(serialize($row));
+}
+
 foreach ($attempts as $attempt) {
-    $cdrQ->execute(array($attempt['cdr_accountcode'], $attempt['cdr_accountcode']));
+    $fullUserfield = 'GC-' . $attempt['correlation_token'];
+    $cdrQ->execute(array($attempt['cdr_accountcode'], $fullUserfield));
     $rows = $cdrQ->fetchAll();
-    if (!$rows) { $counts['waiting']++; continue; }
+    if (!$rows) {
+        $counts['waiting']++;
+        if (!isset($options['dry-run'])) $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), $attempt['id']));
+        continue;
+    }
+    // Correlation tags may be present only on the agent/Local leg. Expand to all
+    // finalized CDR rows sharing its linked ID before selecting the customer leg.
+    if ($linkedIdColumn !== '') {
+        $linkedValues = array();
+        foreach ($rows as $row) if (!empty($row['linkedid'])) $linkedValues[$row['linkedid']] = true;
+        if ($linkedValues) {
+            $placeholders = implode(',', array_fill(0, count($linkedValues), '?'));
+            $linkedSql = 'SELECT calldate,dst,dcontext,channel,dstchannel,lastapp,lastdata,duration,billsec,disposition,'
+                       . 'accountcode,uniqueid,userfield,' . $linkedIdSelect . ',recordingfile FROM `' . $cdrTable . '` WHERE `'
+                       . $linkedIdColumn . '` IN (' . $placeholders . ') ORDER BY calldate,uniqueid';
+            $linkedQ = $cdrDb->prepare($linkedSql);
+            $linkedQ->execute(array_keys($linkedValues));
+            $allRows = array();
+            foreach (array_merge($rows, $linkedQ->fetchAll()) as $row) $allRows[gc_cdr_row_key($row)] = $row;
+            $rows = array_values($allRows);
+        }
+    }
     $linked = array();
     foreach ($rows as $row) if (!empty($row['linkedid'])) $linked[$row['linkedid']] = true;
     $ambiguous = count($linked) > 1;
@@ -97,7 +134,11 @@ foreach ($attempts as $attempt) {
                 $updatePhone->execute(array($phoneState, $attempt['phone_id']));
             }
             $counts['updated'] += $update->rowCount(); $db->commit();
-        } catch (Exception $e) { $db->rollBack(); fwrite(STDERR, 'Attempt ' . $attempt['id'] . " failed\n"); }
+        } catch (Exception $e) {
+            $db->rollBack();
+            $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), $attempt['id']));
+            fwrite(STDERR, 'Attempt ' . $attempt['id'] . " failed\n");
+        }
     }
 }
 echo json_encode($counts) . "\n";

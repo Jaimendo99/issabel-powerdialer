@@ -1,5 +1,11 @@
 <?php
 
+/** Asterisk explicitly rejected Originate; no call was accepted. */
+class GestionClientesAmiRejectedException extends RuntimeException {}
+
+/** Originate bytes were sent but no authoritative response was received. */
+class GestionClientesAmiUnknownException extends RuntimeException {}
+
 /** Minimal AMI client for agent-first Gestion de Clientes originates. */
 class GestionClientesDialer
 {
@@ -72,24 +78,35 @@ class GestionClientesDialer
             throw new InvalidArgumentException('Invalid dialplan context');
         $this->connect();
         $actionId = 'gc-' . str_replace('-', '', $correlationToken);
-        $reply = $this->action(array(
-            'Action' => 'Originate', 'ActionID' => $actionId,
-            'Channel' => $this->config['agent_technology'] . '/' . $agentExtension,
-            'Context' => $dialContext, 'Exten' => $phone, 'Priority' => '1',
-            'Timeout' => '30000', 'CallerID' => 'Gestion Clientes <' . $agentExtension . '>',
-            'Account' => $accountCode,
-            'Variable' => '__GC_ATTEMPT_ID=' . $correlationToken,
-            'Async' => 'true'
-        ));
+        try {
+            $reply = $this->action(array(
+                'Action' => 'Originate', 'ActionID' => $actionId,
+                'Channel' => $this->config['agent_technology'] . '/' . $agentExtension,
+                'Context' => $dialContext, 'Exten' => $phone, 'Priority' => '1',
+                'Timeout' => '30000', 'CallerID' => 'Gestion Clientes <' . $agentExtension . '>',
+                'Account' => $accountCode,
+                'Variable' => '__GC_ATTEMPT_ID=' . $correlationToken,
+                'Async' => 'true'
+            ), true);
+        } catch (GestionClientesAmiUnknownException $e) {
+            throw $e;
+        } catch (Exception $e) {
+            // connect/authentication and a zero-byte write happen before Asterisk
+            // can accept Originate, and are therefore safe to classify as rejected.
+            throw new GestionClientesAmiRejectedException('Originate was not sent');
+        }
+        if (!isset($reply['response'])) {
+            throw new GestionClientesAmiUnknownException('AMI response was incomplete');
+        }
         if (!$this->isSuccess($reply)) {
             $message = isset($reply['message']) ? $reply['message'] : 'Originate rejected';
             $this->log('AMI originate rejected: ' . $message);
-            throw new RuntimeException('Call could not be originated');
+            throw new GestionClientesAmiRejectedException('Originate rejected');
         }
         return array('accepted' => true, 'action_id' => $actionId);
     }
 
-    private function action($fields)
+    private function action($fields, $originate = false)
     {
         if (!$this->socket) throw new RuntimeException('AMI is not connected');
         $payload = '';
@@ -98,9 +115,23 @@ class GestionClientesDialer
                 throw new InvalidArgumentException('Invalid AMI field');
             $payload .= $name . ': ' . $value . "\r\n";
         }
-        if (@fwrite($this->socket, $payload . "\r\n") === false)
-            throw new RuntimeException('AMI write failed');
-        return $this->readMessage();
+        $payload .= "\r\n";
+        $written = 0;
+        $length = strlen($payload);
+        while ($written < $length) {
+            $count = @fwrite($this->socket, substr($payload, $written));
+            if ($count === false || $count === 0) {
+                if ($originate && $written > 0) throw new GestionClientesAmiUnknownException('Partial AMI Originate write');
+                throw new RuntimeException('AMI write failed');
+            }
+            $written += $count;
+        }
+        try {
+            return $this->readMessage();
+        } catch (Exception $e) {
+            if ($originate) throw new GestionClientesAmiUnknownException('AMI Originate response unavailable');
+            throw $e;
+        }
     }
 
     private function readMessage()

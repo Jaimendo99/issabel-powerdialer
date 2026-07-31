@@ -126,6 +126,25 @@ test_case('call origination has durable duplicate and correlation safeguards', f
     assert_true(strpos($workflow, 'ATTEMPT_NOT_FINISHED') !== false, 'Business outcomes must be gated until the technical attempt ends');
 });
 
+test_case('agent cannot start another call before resolving the previous attempt', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    assert_true(strpos($workflow, "technical_state IN (\\'CREATED\\',\\'ORIGINATED\\',\\'RINGING\\',\\'ANSWERED\\',\\'AMBIGUOUS\\')") !== false, 'Active and uncertain attempts must block another call inside the transaction');
+    assert_true(strpos($workflow, "previousFinished['business_outcome_id'] === null") !== false && strpos($workflow, 'OUTCOME_REQUIRED_BEFORE_CALL') !== false, 'The transactional workflow must require a disposition for the immediately preceding ended attempt');
+    assert_true(strpos($index, 'OUTCOME_REQUIRED_BEFORE_CALL') !== false, 'The API must expose a stable pending-outcome error');
+});
+
+test_case('uncertain AMI responses remain unresolved instead of triggering a duplicate retry', function () {
+    $dialer = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesDialer.class.php');
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    assert_true(strpos($dialer, 'GestionClientesAmiUnknownException') !== false, 'AMI must distinguish an unknown post-write result from an explicit rejection');
+    assert_true(strpos($workflow, "technical_state=\\'AMBIGUOUS\\', ended_at=NULL") !== false, 'An unknown AMI result must remain unresolved');
+    assert_true(strpos($workflow, 'AMI_RESULT_UNKNOWN') !== false, 'The workflow must return a stable unknown-result error');
+    $catchEnd = strpos($workflow, "throw new RuntimeException('AMI_ORIGINATE_FAILED');");
+    $originatedUpdate = strpos($workflow, "technical_state=\\'ORIGINATED\\'");
+    assert_true($catchEnd !== false && $originatedUpdate !== false && $originatedUpdate > $catchEnd, 'A database failure after accepted Originate must not be misclassified as an AMI rejection');
+});
+
 test_case('queue does not immediately reclaim follow-up outcome states', function () {
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
     assert_true(strpos($workflow, "c.state IN (\\'PENDING\\',\\'NO_CONTACT\\',\\'CALLBACK\\')") !== false, 'Claim queue must only include immediately actionable client states');
@@ -144,6 +163,15 @@ test_case('CDR reconciliation supports local timestamps and missing linkedid', f
     assert_true(strpos($source, 'cdr_linkedid_column') !== false, 'Linked ID column must be configurable');
     assert_true(strpos($source, 'cdr_timezone') !== false && strpos($source, "new DateTimeZone") !== false, 'CDR local time must be converted through a configured timezone');
     assert_true(strpos($source, "isset(\$config['timezone'])") !== false, 'Reconciler must inherit the installation timezone when a dedicated CDR timezone is omitted');
+});
+
+test_case('CDR reconciliation backs off unmatched attempts without starving newer calls', function () {
+    $source = file_get_contents(GC_PROJECT_ROOT . '/bin/reconcile_cdr.php');
+    $migration = file_get_contents(GC_PROJECT_ROOT . '/install/migrations/003_cdr_retry_schedule.sql');
+    assert_true(strpos($source, 'cdr_next_retry_at<=UTC_TIMESTAMP()') !== false, 'Only eligible retry rows should enter a bounded reconciliation batch');
+    assert_true(strpos($source, 'gc_cdr_retry_delay') !== false, 'Unmatched attempts must be rescheduled with bounded backoff');
+    assert_true(strpos($migration, 'cdr_next_retry_at') !== false && strpos($migration, 'idx_gc_attempt_unreconciled') !== false, 'The retry schedule requires an indexed migration');
+    assert_true(strpos($migration, 'VALUES (3, UTC_TIMESTAMP())') !== false, 'Migration 003 must be recorded in the schema ledger');
 });
 
 test_case('dynamic seat keeps permanent agent identity for ownership and statistics', function () {

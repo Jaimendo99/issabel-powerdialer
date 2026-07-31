@@ -97,9 +97,16 @@ class GestionClientesWorkflow
             if ($recent) {
                 throw new RuntimeException('CALL_RATE_LIMITED');
             }
-            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') LIMIT 1', array($agent['id']));
+            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\') LIMIT 1', array($agent['id']));
             if ($active) {
                 throw new RuntimeException('ACTIVE_ATTEMPT_EXISTS');
+            }
+            // Enforce the immediately preceding finished call. Older historical
+            // rows may predate disposition enforcement and must not deadlock an
+            // upgraded installation after a newer call was already resolved.
+            $previousFinished = $tx->fetchOne('SELECT id, business_outcome_id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1', array($agent['id']));
+            if ($previousFinished && $previousFinished['business_outcome_id'] === null) {
+                throw new RuntimeException('OUTCOME_REQUIRED_BEFORE_CALL');
             }
             $token = $tx->uuid();
             // Asterisk's production CDR accountcode is VARCHAR(20).  Keep the full
@@ -124,19 +131,28 @@ class GestionClientesWorkflow
         }
         $dialNumber = GestionClientesValidator::toDialString($attempt['normalized_value']);
         if ($dialNumber === false) {
-            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'INVALID_DIAL_NUMBER\' WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'INVALID_DIAL_NUMBER\', reconciled_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
             throw new RuntimeException('PHONE_NOT_ELIGIBLE');
         }
         try {
             $result = $this->dialer->originate($attempt['agent_sip_extension'], $dialNumber, $attempt['correlation_token'], $attempt['cdr_accountcode']);
-            $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
-            $attempt['technical_state'] = 'ORIGINATED';
-            $attempt['ami'] = $result;
+        } catch (GestionClientesAmiUnknownException $e) {
+            // Asterisk may have accepted the action. Keep the attempt unresolved
+            // and non-retryable while CDR reconciliation determines what happened.
+            $db->execute('UPDATE gc_attempt SET technical_state=\'AMBIGUOUS\', ended_at=NULL, raw_error_code=\'AMI_RESULT_UNKNOWN\' WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            $attempt['technical_state'] = 'AMBIGUOUS';
+            throw new RuntimeException('AMI_RESULT_UNKNOWN');
         } catch (Exception $e) {
-            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'AMI_ORIGINATE_FAILED\' WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'AMI_ORIGINATE_FAILED\', reconciled_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
             $attempt['technical_state'] = 'FAILED';
             throw new RuntimeException('AMI_ORIGINATE_FAILED');
         }
+        // Keep persistence outside the AMI catch. If this update fails after an
+        // accepted Originate, the CREATED row remains an active duplicate guard
+        // and CDR reconciliation can still establish the final call state.
+        $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+        $attempt['technical_state'] = 'ORIGINATED';
+        $attempt['ami'] = $result;
         return $attempt;
     }
 

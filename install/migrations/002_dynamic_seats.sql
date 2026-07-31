@@ -63,3 +63,5 @@ SET @gc_add_ws_fk = IF(
   'SELECT 1'
 );
 PREPARE gc_stmt FROM @gc_add_ws_fk; EXECUTE gc_stmt; DEALLOCATE PREPARE gc_stmt;
+
+INSERT IGNORE INTO gc_schema_version (version_num, applied_at) VALUES (2, UTC_TIMESTAMP());

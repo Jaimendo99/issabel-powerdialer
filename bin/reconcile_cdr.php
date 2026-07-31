@@ -34,7 +34,7 @@ if (!preg_match('/^[A-Za-z0-9_]{1,64}$/', $cdrTable)) { fwrite(STDERR, "Invalid 
 $linkedIdColumn = isset($config['cdr_linkedid_column']) ? $config['cdr_linkedid_column'] : 'linkedid';
 if ($linkedIdColumn !== '' && !preg_match('/^[A-Za-z0-9_]{1,64}$/', $linkedIdColumn)) { fwrite(STDERR, "Invalid linkedid column\n"); exit(2); }
 $linkedIdSelect = $linkedIdColumn === '' ? "'' AS linkedid" : '`' . $linkedIdColumn . '` AS linkedid';
-$cdrTimezoneName = isset($config['cdr_timezone']) ? $config['cdr_timezone'] : 'UTC';
+$cdrTimezoneName = isset($config['cdr_timezone']) ? $config['cdr_timezone'] : (isset($config['timezone']) ? $config['timezone'] : 'UTC');
 try { $cdrTimezone = new DateTimeZone($cdrTimezoneName); }
 catch (Exception $e) { fwrite(STDERR, "Invalid CDR timezone\n"); exit(2); }
 $utcTimezone = new DateTimeZone('UTC');

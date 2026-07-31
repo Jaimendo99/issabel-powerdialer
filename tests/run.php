@@ -137,6 +137,7 @@ test_case('CDR reconciliation supports local timestamps and missing linkedid', f
     $source = file_get_contents(GC_PROJECT_ROOT . '/bin/reconcile_cdr.php');
     assert_true(strpos($source, 'cdr_linkedid_column') !== false, 'Linked ID column must be configurable');
     assert_true(strpos($source, 'cdr_timezone') !== false && strpos($source, "new DateTimeZone") !== false, 'CDR local time must be converted through a configured timezone');
+    assert_true(strpos($source, "isset(\$config['timezone'])") !== false, 'Reconciler must inherit the installation timezone when a dedicated CDR timezone is omitted');
 });
 
 test_case('dynamic seat keeps permanent agent identity for ownership and statistics', function () {

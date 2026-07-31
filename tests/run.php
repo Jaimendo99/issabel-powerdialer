@@ -120,6 +120,13 @@ test_case('call origination has durable duplicate and correlation safeguards', f
     assert_true(strpos($workflow, 'ATTEMPT_NOT_FINISHED') !== false, 'Business outcomes must be gated until the technical attempt ends');
 });
 
+test_case('Asterisk 11 dialplan derives its compact CDR key from the attempt UUID', function () {
+    $dialplan = file_get_contents(GC_PROJECT_ROOT . '/asterisk/extensions_gestion_clientes.conf');
+    assert_true(strpos($dialplan, 'FILTER(0-9a-fA-F,${GC_ATTEMPT_ID})') !== false, 'Dialplan must derive the compact CDR key from the validated attempt UUID');
+    assert_true(strpos($dialplan, 'Set(CDR(accountcode)=${GC_ACCOUNT_CODE})') !== false, 'Dialplan must explicitly set accountcode on the answered agent leg');
+    assert_true(strpos($dialplan, 'REGEX("^GC-[0-9a-fA-F]{17}$" ${CDR(accountcode)})') === false, 'Dialplan must not depend on AMI Account being visible through CDR(accountcode)');
+});
+
 test_case('CDR reconciliation supports local timestamps and missing linkedid', function () {
     $source = file_get_contents(GC_PROJECT_ROOT . '/bin/reconcile_cdr.php');
     assert_true(strpos($source, 'cdr_linkedid_column') !== false, 'Linked ID column must be configurable');

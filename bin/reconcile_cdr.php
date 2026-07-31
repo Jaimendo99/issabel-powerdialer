@@ -31,6 +31,9 @@ $appDsn = isset($app['dsn']) ? $app['dsn'] : gc_env('GC_DB_DSN', 'mysql:host=127
 $cdrDsn = isset($cdr['dsn']) ? $cdr['dsn'] : gc_env('GC_CDR_DSN', 'mysql:host=127.0.0.1;dbname=asteriskcdrdb;charset=utf8');
 $cdrTable = isset($config['cdr_table']) ? $config['cdr_table'] : (isset($cdr['table']) ? $cdr['table'] : 'cdr');
 if (!preg_match('/^[A-Za-z0-9_]{1,64}$/', $cdrTable)) { fwrite(STDERR, "Invalid CDR table\n"); exit(2); }
+$linkedIdColumn = isset($config['cdr_linkedid_column']) ? $config['cdr_linkedid_column'] : 'linkedid';
+if ($linkedIdColumn !== '' && !preg_match('/^[A-Za-z0-9_]{1,64}$/', $linkedIdColumn)) { fwrite(STDERR, "Invalid linkedid column\n"); exit(2); }
+$linkedIdSelect = $linkedIdColumn === '' ? "'' AS linkedid" : '`' . $linkedIdColumn . '` AS linkedid';
 $pdoOptions = array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC);
 try {
     $db = new PDO($appDsn, isset($app['user']) ? $app['user'] : gc_env('GC_DB_USER', ''), isset($app['password']) ? $app['password'] : gc_env('GC_DB_PASSWORD', ''), $pdoOptions);
@@ -42,7 +45,7 @@ $sql = 'SELECT a.id,a.phone_id,a.cdr_accountcode,p.normalized_value FROM gc_atte
      . ' WHERE a.reconciled_at IS NULL AND a.requested_at<=? ORDER BY a.id ASC LIMIT ' . $limit;
 $q = $db->prepare($sql); $q->execute(array($cutoff)); $attempts = $q->fetchAll();
 $cdrSql = 'SELECT calldate,dst,dcontext,channel,dstchannel,lastapp,lastdata,duration,billsec,disposition,'
-        . 'accountcode,uniqueid,userfield,linkedid,recordingfile FROM `' . $cdrTable . '` WHERE accountcode=? OR userfield=? ORDER BY calldate,uniqueid';
+        . 'accountcode,uniqueid,userfield,' . $linkedIdSelect . ',recordingfile FROM `' . $cdrTable . '` WHERE accountcode=? OR userfield=? ORDER BY calldate,uniqueid';
 $cdrQ = $cdrDb->prepare($cdrSql);
 $update = $db->prepare('UPDATE gc_attempt SET technical_state=?,asterisk_uniqueid=?,linkedid=?,duration_seconds=?,'
     . 'talk_seconds=?,recording_path=?,raw_error_code=?,answered_at=?,ended_at=?,reconciled_at=UTC_TIMESTAMP() WHERE id=? AND reconciled_at IS NULL');

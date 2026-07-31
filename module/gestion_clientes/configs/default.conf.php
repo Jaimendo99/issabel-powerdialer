@@ -20,7 +20,8 @@ $gcConfig = array(
     'cdr_dsn' => 'mysql:host=127.0.0.1;dbname=asteriskcdrdb;charset=utf8',
     'cdr_user' => 'gestion_clientes_cdr',
     'cdr_password' => '',
-    'cdr_table' => 'cdr'
+    'cdr_table' => 'cdr',
+    'cdr_linkedid_column' => 'linkedid'
 );
 
 $gcLocalConfig = '/etc/issabel/gestion_clientes.conf.php';

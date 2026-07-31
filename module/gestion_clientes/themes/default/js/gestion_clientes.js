@@ -30,6 +30,14 @@
     function setOutcomeRequired(workspace, required) {
         workspace.attr('data-gc-outcome-required', required ? '1' : '0');
     }
+    function attemptStateText(state) {
+        var labels = {CREATED: 'Preparando…', ORIGINATED: 'Llamando…', RINGING: 'Timbrando…', ANSWERED: 'Contestada', BUSY: 'Ocupado', NO_ANSWER: 'Sin respuesta', FAILED: 'Falló', CANCELED: 'Cancelada', AMBIGUOUS: 'Verificando llamada…'};
+        return labels[state] || state || '';
+    }
+    function phoneCard(workspace, phoneId) {
+        if (!phoneId || !/^\d+$/.test(String(phoneId))) { return $(); }
+        return workspace.find('[data-gc-phone-card][data-phone-id="' + phoneId + '"]').first();
+    }
     function pollAttempt(workspace, count) {
         var url = workspace.attr('data-status-url'), attemptId = workspace.attr('data-attempt-id');
         count = count || 0;
@@ -37,7 +45,11 @@
         $.ajax({url: url, type: 'GET', data: {attempt_id: attemptId}, dataType: 'json'})
             .done(function (response) {
                 if (!response || !response.ok || !response.data) { return; }
-                workspace.find('.gc-call-status').text(response.data.technical_state || '');
+                var card = phoneCard(workspace, response.data.phone_id), status = card.find('.gc-call-status');
+                if (!card.length) { status = workspace.find('.gc-call-status').first(); }
+                workspace.find('[data-gc-phone-card]').removeClass('gc-phone-calling');
+                if (!response.data.ended_at && card.length) { card.addClass('gc-phone-calling'); }
+                status.text(attemptStateText(response.data.technical_state));
                 if (response.data.ended_at && !response.data.business_outcome_id) {
                     $('[data-gc-outcome-form] button[type=submit]').prop('disabled', false);
                     $('[data-gc-call-form] button[type=submit]').prop('disabled', true);
@@ -63,10 +75,12 @@
             if (field.length && !field.val()) { field.val(idempotencyKey()); }
         });
         $('[data-gc-call-form]').on('submit', function (event) {
-            var form = $(this), status = form.find('.gc-call-status');
+            var form = $(this), status = form.find('.gc-call-status'),
+                callButtons = $('[data-gc-call-form] button[type=submit]'),
+                enabledButtons = callButtons.filter(':enabled');
             if (!window.FormData || !form.attr('action')) { return; }
             event.preventDefault();
-            form.find('button').prop('disabled', true);
+            callButtons.prop('disabled', true);
             status.text('Procesando…');
             $.ajax({url: form.attr('action'), type: 'POST', data: form.serialize(), dataType: 'json'})
                 .done(function (response) {
@@ -74,6 +88,8 @@
                     if (response && response.ok && response.data && response.data.id) {
                         $('[data-gc-workspace]').attr('data-attempt-id', response.data.id);
                         $('[data-gc-outcome-form] input[name=attempt_id]').val(response.data.id);
+                        form.closest('[data-gc-phone-card]').addClass('gc-phone-calling');
+                        status.text('Llamando…');
                         window.setTimeout(function () { pollAttempt($('[data-gc-workspace]').first()); }, 3000);
                     }
                     if (!response || !response.ok) {
@@ -83,7 +99,7 @@
                         } else if (response && (response.code === 'ACTIVE_ATTEMPT_EXISTS' || response.code === 'AMI_RESULT_UNKNOWN' || response.code === 'AMI_ORIGINATE_FAILED')) {
                             form.find('button').prop('disabled', true);
                         } else {
-                            form.find('button').prop('disabled', false);
+                            enabledButtons.prop('disabled', false);
                         }
                     }
                 })

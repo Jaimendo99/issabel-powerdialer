@@ -95,6 +95,23 @@ test_case('CSV import detects delimiter and maps rows', function () {
     assert_same('+593991234567', $preview['sample'][0]['phones'][0]['normalized'], 'Imported phone should use the shared normalizer');
 });
 
+test_case('CSV import preserves multiple phone order and deduplicates normalized values', function () {
+    gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
+    gc_require_class('GestionClientesImport', 'module/gestion_clientes/libs/GestionClientesImport.class.php');
+    $import = new GestionClientesImport(null);
+    $mapping = array(
+        'external_id' => 'id',
+        'display_name' => 'nombre',
+        'phones' => array('telefono_principal', 'telefono_duplicado', 'telefono_alterno')
+    );
+    $preview = $import->preview(GC_PROJECT_ROOT . '/tests/fixtures/clients-multiple-phones.csv', $mapping, 0);
+    assert_same(1, $preview['accepted'], 'The client with multiple valid phones must be accepted');
+    assert_same(2, count($preview['sample'][0]['phones']), 'Equivalent formatted numbers must appear only once');
+    assert_same('+593991234567', $preview['sample'][0]['phones'][0]['normalized'], 'Primary phone must remain first');
+    assert_same('+593987654321', $preview['sample'][0]['phones'][1]['normalized'], 'Distinct alternate phone must remain second');
+    assert_same('telefono_principal', $preview['sample'][0]['phones'][0]['type'], 'Deduplication must retain the first field label');
+});
+
 test_case('schema contains concurrency and idempotency safeguards', function () {
     $sql = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
     assert_true(strpos($sql, 'UNIQUE KEY uq_gc_attempt_idempotency') !== false, 'Attempt idempotency constraint is missing');
@@ -207,6 +224,29 @@ test_case('call form cannot override the server-side selected seat', function ()
     $matched = preg_match('/<form[^>]*gc-call-form[^>]*>([\s\S]*?)<\/form>/', $template, $parts);
     assert_true($matched === 1, 'Agent workspace call form is missing');
     assert_true(!preg_match('/name=[\'\"][^\'\"]*(seat|extension)[^\'\"]*[\'\"]/i', $parts[1]), 'Call requests must not post a seat/extension that can override the server-side session selection');
+});
+
+test_case('workspace phone view exposes per-number state and attempt history', function () {
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    assert_true((bool) preg_match('/function\s+gc_client_view[\s\S]*?[\'\"]state[\'\"]\s*=>\s*\$p\s*\[[\'\"]state[\'\"]/', $index), 'Each rendered phone must retain its current state');
+    assert_true(strpos($index, "'attempt_count'=>(int)\$p['attempt_count']") !== false, 'Each rendered phone must expose its attempt count');
+    assert_true(strpos($index, "'last_call_at'=>\$lastCall") !== false && strpos($index, "'last_attempt'=>\$p['last_attempt']") !== false, 'Each rendered phone must expose its localized last-attempt timestamp and summary');
+});
+
+test_case('workspace renders one prominent call action bound to each phone id', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    $javascript = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/js/gestion_clientes.js');
+    $matched = preg_match('/\{foreach\s+from=\$client\.phones[^}]*item=p\}(.*?)\{\/foreach\}/s', $template, $parts);
+    assert_true($matched === 1, 'Workspace must iterate over every client phone');
+    $phoneBlock = $parts[1];
+    assert_true(strpos($phoneBlock, '{$p.id') !== false, 'Every phone action must be bound to that iteration phone ID');
+    assert_true((bool) preg_match('/<input\b(?=[^>]*name=[\'\"]phone_id[\'\"])(?=[^>]*value=[\'\"]\{\$p\.id)[^>]*>/i', $phoneBlock), 'Every phone card must serialize its own hidden phone_id; submit-button values are omitted by jQuery serialize()');
+    assert_true((bool) preg_match('/<button\b/i', $phoneBlock), 'Every phone must have a directly visible call button');
+    assert_true(!preg_match('/<select\b[^>]*name=[\'\"]phone_id[\'\"]/i', $template), 'Phone calls must not be hidden behind a single shared selector');
+    assert_true(strpos($phoneBlock, '{$p.state') !== false, 'Phone card must display its state');
+    assert_true(strpos($phoneBlock, '{$p.attempt_count') !== false, 'Phone card must display its attempt count');
+    assert_true((bool) preg_match('/\{\$p\.(last_attempt_at|last_call_at|last_attempt)/', $phoneBlock), 'Phone card must display its last attempt');
+    assert_true(strpos($javascript, 'form.serialize()') !== false, 'AJAX call submission must serialize only the clicked phone form');
 });
 
 foreach ($tests as $name => $callback) {

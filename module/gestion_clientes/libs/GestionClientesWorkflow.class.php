@@ -120,7 +120,7 @@ class GestionClientesWorkflow
             $tx->execute('UPDATE gc_client_phone SET state=\'ATTEMPTED\', attempt_count=attempt_count+1, last_attempt_at=UTC_TIMESTAMP() WHERE id=?', array($phoneId));
             $tx->execute('UPDATE gc_client SET last_attempt_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?', array($clientId));
             $tx->audit($clientId, $actor, 'CALL_REQUESTED', 'IN_PROGRESS', 'IN_PROGRESS', array('attempt_id' => $attemptId, 'phone_id' => $phoneId, 'sip_extension' => $seat['sip_extension']), $ip);
-            return array('id' => $attemptId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'agent_sip_extension' => $seat['sip_extension'], 'technical_state' => 'CREATED');
+            return array('id' => $attemptId, 'phone_id' => (int)$phoneId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'agent_sip_extension' => $seat['sip_extension'], 'technical_state' => 'CREATED');
         });
         if (!empty($attempt['_idempotent_replay'])) {
             unset($attempt['_idempotent_replay']);
@@ -225,7 +225,43 @@ class GestionClientesWorkflow
         if (!is_array($row['custom_data'])) {
             $row['custom_data'] = array();
         }
-        $row['phones'] = $this->db->fetchAll('SELECT * FROM gc_client_phone WHERE client_id=? ORDER BY sort_order, id', array($row['id']));
+        $phones = $this->db->fetchAll('SELECT * FROM gc_client_phone WHERE client_id=? ORDER BY sort_order, id', array($row['id']));
+        $lastAttempts = $this->db->fetchAll(
+            'SELECT at.id, at.phone_id, at.requested_at, at.technical_state, at.business_outcome_id, o.code AS outcome_code, o.label AS outcome_label FROM (SELECT phone_id, MAX(id) AS attempt_id FROM gc_attempt WHERE client_id=? GROUP BY phone_id) latest JOIN gc_attempt at ON at.id=latest.attempt_id LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id ORDER BY at.id',
+            array($row['id'])
+        );
+        $lastByPhone = array();
+        foreach ($lastAttempts as $lastAttempt) {
+            $lastByPhone[(string)$lastAttempt['phone_id']] = $lastAttempt;
+        }
+        foreach ($phones as &$phone) {
+            $key = (string)$phone['id'];
+            $phone['attempt_count'] = (int)$phone['attempt_count'];
+            $phone['last_call_at'] = $phone['last_attempt_at'];
+            $phone['last_technical_state'] = null;
+            $phone['last_business_outcome_id'] = null;
+            $phone['last_business_outcome_code'] = null;
+            $phone['last_business_outcome_label'] = null;
+            $phone['last_attempt'] = null;
+            if (isset($lastByPhone[$key])) {
+                $last = $lastByPhone[$key];
+                $phone['last_call_at'] = $last['requested_at'];
+                $phone['last_technical_state'] = $last['technical_state'];
+                $phone['last_business_outcome_id'] = $last['business_outcome_id'];
+                $phone['last_business_outcome_code'] = $last['outcome_code'];
+                $phone['last_business_outcome_label'] = $last['outcome_label'];
+                $phone['last_attempt'] = array(
+                    'id' => (int)$last['id'],
+                    'requested_at' => $last['requested_at'],
+                    'technical_state' => $last['technical_state'],
+                    'business_outcome_id' => $last['business_outcome_id'] === null ? null : (int)$last['business_outcome_id'],
+                    'business_outcome_code' => $last['outcome_code'],
+                    'business_outcome_label' => $last['outcome_label']
+                );
+            }
+        }
+        unset($phone);
+        $row['phones'] = $phones;
         $row['history'] = $this->db->fetchAll('SELECT at.*, o.label AS outcome_label FROM gc_attempt at LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id WHERE at.client_id=? ORDER BY at.requested_at DESC, at.id DESC LIMIT 50', array($row['id']));
         return $row;
     }

@@ -21,7 +21,8 @@ $gcConfig = array(
     'cdr_user' => 'gestion_clientes_cdr',
     'cdr_password' => '',
     'cdr_table' => 'cdr',
-    'cdr_linkedid_column' => 'linkedid'
+    'cdr_linkedid_column' => 'linkedid',
+    'cdr_timezone' => 'America/Guayaquil'
 );
 
 $gcLocalConfig = '/etc/issabel/gestion_clientes.conf.php';

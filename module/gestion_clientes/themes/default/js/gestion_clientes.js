@@ -11,7 +11,24 @@
     function idempotencyKey() {
         return 'gc-' + new Date().getTime() + '-' + Math.floor(Math.random() * 1000000000);
     }
+    function pollAttempt(workspace, count) {
+        var url = workspace.attr('data-status-url'), attemptId = workspace.attr('data-attempt-id');
+        count = count || 0;
+        if (!url || !attemptId || count >= 100) { return; }
+        $.ajax({url: url, type: 'GET', data: {attempt_id: attemptId}, dataType: 'json'})
+            .done(function (response) {
+                if (!response || !response.ok || !response.data) { return; }
+                workspace.find('.gc-call-status').text(response.data.technical_state || '');
+                if (response.data.ended_at) {
+                    $('[data-gc-outcome-form] button[type=submit]').prop('disabled', false);
+                } else {
+                    window.setTimeout(function () { pollAttempt(workspace, count + 1); }, 3000);
+                }
+            })
+            .fail(function () { window.setTimeout(function () { pollAttempt(workspace, count + 1); }, 3000); });
+    }
     $(function () {
+        $('[data-gc-workspace]').each(function () { pollAttempt($(this)); });
         $('[data-gc-outcome]').each(function () { callbackVisibility(this); }).on('change', function () { callbackVisibility(this); });
         $('form').on('submit', function () {
             var field = $(this).find('input[name=idempotency_key]');
@@ -27,8 +44,9 @@
                 .done(function (response) {
                     status.text(response && response.message ? response.message : 'Solicitud enviada.');
                     if (response && response.ok && response.data && response.data.id) {
+                        $('[data-gc-workspace]').attr('data-attempt-id', response.data.id);
                         $('[data-gc-outcome-form] input[name=attempt_id]').val(response.data.id);
-                        $('[data-gc-outcome-form] button[type=submit]').prop('disabled', false);
+                        window.setTimeout(function () { pollAttempt($('[data-gc-workspace]').first()); }, 3000);
                     }
                     if (!response || !response.ok) { form.find('button').prop('disabled', false); }
                 })

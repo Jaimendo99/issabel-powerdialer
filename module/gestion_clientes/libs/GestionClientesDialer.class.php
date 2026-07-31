@@ -57,7 +57,7 @@ class GestionClientesDialer
         return true;
     }
 
-    public function originate($agentExtension, $phone, $correlationToken, $context = null)
+    public function originate($agentExtension, $phone, $correlationToken, $accountCode, $context = null)
     {
         if (!preg_match('/^[0-9]{1,20}$/', (string)$agentExtension))
             throw new InvalidArgumentException('Invalid agent extension');
@@ -65,6 +65,8 @@ class GestionClientesDialer
             throw new InvalidArgumentException('Invalid destination number');
         if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', (string)$correlationToken))
             throw new InvalidArgumentException('Invalid correlation token');
+        if (!preg_match('/^GC-[0-9a-f]{17}$/i', (string)$accountCode))
+            throw new InvalidArgumentException('Invalid CDR account code');
         $dialContext = $context === null ? $this->config['context'] : $context;
         if (!preg_match('/^[A-Za-z0-9_-]{1,80}$/', (string)$dialContext))
             throw new InvalidArgumentException('Invalid dialplan context');
@@ -75,6 +77,7 @@ class GestionClientesDialer
             'Channel' => $this->config['agent_technology'] . '/' . $agentExtension,
             'Context' => $dialContext, 'Exten' => $phone, 'Priority' => '1',
             'Timeout' => '30000', 'CallerID' => 'Gestion Clientes <' . $agentExtension . '>',
+            'Account' => $accountCode,
             'Variable' => '__GC_ATTEMPT_ID=' . $correlationToken,
             'Async' => 'true'
         ));

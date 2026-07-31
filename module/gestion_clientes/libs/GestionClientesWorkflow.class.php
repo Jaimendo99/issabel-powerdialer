@@ -36,7 +36,7 @@ class GestionClientesWorkflow
                 return $self->hydrateClient($existing);
             }
             $client = $tx->fetchOne(
-                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL ORDER BY CASE WHEN EXISTS (SELECT 1 FROM gc_callback cb WHERE cb.assignment_id=a.id AND cb.status=\'OPEN\' AND cb.due_at_utc<=UTC_TIMESTAMP()) THEN 0 WHEN c.state=\'CALLBACK\' THEN 1 ELSE 2 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
+                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL AND (c.state<>\'CALLBACK\' OR EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP())) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()) THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
                 array($agentMapId)
             );
             if (!$client) {
@@ -65,6 +65,9 @@ class GestionClientesWorkflow
         $attempt = $db->transaction(function ($tx) use ($agent, $clientId, $phoneId, $claimToken, $idempotencyKey, $actor, $ip) {
             $existing = $tx->fetchOne('SELECT * FROM gc_attempt WHERE agent_map_id=? AND idempotency_key=?', array($agent['id'], $idempotencyKey));
             if ($existing) {
+                // An accepted AMI request can outlive the PHP request.  Never send it
+                // again merely because the post-originate state update was interrupted.
+                $existing['_idempotent_replay'] = true;
                 return $existing;
             }
             $row = $tx->fetchOne(
@@ -77,12 +80,27 @@ class GestionClientesWorkflow
             if (in_array($row['phone_state'], array('INVALID','DO_NOT_CALL'), true)) {
                 throw new RuntimeException('PHONE_NOT_ELIGIBLE');
             }
-            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE assignment_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') FOR UPDATE', array($row['assignment_id']));
+            // Lock stable parent rows: a SELECT on an empty attempt set is not a mutex.
+            $assignmentLock = $tx->fetchOne('SELECT id FROM gc_assignment WHERE id=? AND agent_map_id=? AND assignment_state=\'ACTIVE\' FOR UPDATE', array($row['assignment_id'], $agent['id']));
+            if (!$assignmentLock) {
+                throw new RuntimeException('CALL_OWNERSHIP_INVALID');
+            }
+            $agentLock = $tx->fetchOne('SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE', array($agent['id']));
+            if (!$agentLock) {
+                throw new RuntimeException('AGENT_MAPPING_REQUIRED');
+            }
+            $recent = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND requested_at>DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 SECOND) ORDER BY id DESC LIMIT 1', array($agent['id']));
+            if ($recent) {
+                throw new RuntimeException('CALL_RATE_LIMITED');
+            }
+            $active = $tx->fetchOne('SELECT id FROM gc_attempt WHERE assignment_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') LIMIT 1', array($row['assignment_id']));
             if ($active) {
                 throw new RuntimeException('ACTIVE_ATTEMPT_EXISTS');
             }
             $token = $tx->uuid();
-            $account = 'GC-' . $token;
+            // Asterisk's production CDR accountcode is VARCHAR(20).  Keep the full
+            // UUID in userfield and use a compact, independently indexed accountcode.
+            $account = 'GC-' . substr(str_replace('-', '', strtolower($token)), 0, 17);
             $tx->execute(
                 'INSERT INTO gc_attempt (campaign_id, client_id, phone_id, assignment_id, agent_map_id, correlation_token, idempotency_key, requested_at, technical_state, cdr_accountcode) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), \'CREATED\', ?)',
                 array($row['campaign_id'], $clientId, $phoneId, $row['assignment_id'], $agent['id'], $token, $idempotencyKey, $account)
@@ -91,14 +109,18 @@ class GestionClientesWorkflow
             $tx->execute('UPDATE gc_client_phone SET state=\'ATTEMPTED\', attempt_count=attempt_count+1, last_attempt_at=UTC_TIMESTAMP() WHERE id=?', array($phoneId));
             $tx->execute('UPDATE gc_client SET last_attempt_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?', array($clientId));
             $tx->audit($clientId, $actor, 'CALL_REQUESTED', 'IN_PROGRESS', 'IN_PROGRESS', array('attempt_id' => $attemptId, 'phone_id' => $phoneId), $ip);
-            return array('id' => $attemptId, 'correlation_token' => $token, 'normalized_value' => $row['normalized_value'], 'technical_state' => 'CREATED');
+            return array('id' => $attemptId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'technical_state' => 'CREATED');
         });
+        if (!empty($attempt['_idempotent_replay'])) {
+            unset($attempt['_idempotent_replay']);
+            return $attempt;
+        }
         if ($attempt['technical_state'] !== 'CREATED') {
             return $attempt;
         }
         $dialNumber = ltrim($attempt['normalized_value'], '+');
         try {
-            $result = $this->dialer->originate($agent['sip_extension'], $dialNumber, $attempt['correlation_token']);
+            $result = $this->dialer->originate($agent['sip_extension'], $dialNumber, $attempt['correlation_token'], $attempt['cdr_accountcode']);
             $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
             $attempt['technical_state'] = 'ORIGINATED';
             $attempt['ami'] = $result;
@@ -123,6 +145,9 @@ class GestionClientesWorkflow
             if ($attempt['business_outcome_id'] !== null) {
                 return array('attempt_id' => (int)$attemptId, 'already_saved' => true);
             }
+            if ($attempt['ended_at'] === null || !in_array($attempt['technical_state'], array('ANSWERED','BUSY','NO_ANSWER','FAILED','CANCELED','AMBIGUOUS'), true)) {
+                throw new RuntimeException('ATTEMPT_NOT_FINISHED');
+            }
             $outcome = $tx->fetchOne(
                 'SELECT * FROM gc_outcome WHERE id=? AND active=1 AND (campaign_id IS NULL OR campaign_id=?)',
                 array($outcomeId, $attempt['campaign_id'])
@@ -141,6 +166,7 @@ class GestionClientesWorkflow
                 }
             }
             $tx->execute('UPDATE gc_attempt SET business_outcome_id=?, agent_note=? WHERE id=?', array($outcomeId, trim($note), $attemptId));
+            $tx->execute('UPDATE gc_callback SET status=\'COMPLETED\', completed_at=UTC_TIMESTAMP() WHERE assignment_id=? AND status=\'OPEN\'', array($attempt['assignment_id']));
             $nextAction = null;
             if ((int)$outcome['requires_callback'] === 1) {
                 $nextAction = GestionClientesValidator::localToUtc($callback['due_at'], $callback['timezone']);

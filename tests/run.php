@@ -110,6 +110,22 @@ test_case('mutation guard enforces POST, CSRF, and constant-time comparison', fu
     assert_true(strpos($source, 'constantTimeEquals') !== false, 'CSRF token comparison must be timing resistant');
 });
 
+test_case('call origination has durable duplicate and correlation safeguards', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $dialer = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesDialer.class.php');
+    assert_true(strpos($workflow, '_idempotent_replay') !== false, 'Existing attempts must never be originated again');
+    assert_true(strpos($workflow, "FROM gc_assignment WHERE id=?") !== false && strpos($workflow, 'FOR UPDATE') !== false, 'Assignment must be locked before active-attempt creation');
+    assert_true(strpos($workflow, "substr(str_replace('-', '', strtolower(\$token)), 0, 17)") !== false, 'CDR accountcode must fit the production 20-character column');
+    assert_true(strpos($dialer, "'Account' => \$accountCode") !== false, 'AMI Originate must tag the agent leg with the compact accountcode');
+    assert_true(strpos($workflow, 'ATTEMPT_NOT_FINISHED') !== false, 'Business outcomes must be gated until the technical attempt ends');
+});
+
+test_case('CDR reconciliation supports local timestamps and missing linkedid', function () {
+    $source = file_get_contents(GC_PROJECT_ROOT . '/bin/reconcile_cdr.php');
+    assert_true(strpos($source, 'cdr_linkedid_column') !== false, 'Linked ID column must be configurable');
+    assert_true(strpos($source, 'cdr_timezone') !== false && strpos($source, "new DateTimeZone") !== false, 'CDR local time must be converted through a configured timezone');
+});
+
 foreach ($tests as $name => $callback) {
     try {
         call_user_func($callback);

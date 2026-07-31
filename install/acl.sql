@@ -1,3 +1,10 @@
--- Template: adapt to the verified Issabel ACL schema.
--- Resources: view, import, assign, call, report, export, administer.
--- No statement is executed automatically because Issabel 4 installations differ.
+-- Documentation template only: Issabel ACL tables differ between installations.
+-- Production uses one resource, menu id "gestion_clientes". Grant that menu
+-- resource to the administrator group and the approved call-center agent group.
+-- The module then applies its own supervisor/agent authorization per action.
+--
+-- Before changing ACL, save both the schema and matching rows, for example:
+--   sqlite3 /var/www/db/acl.db '.schema' > acl-schema-before.txt
+--   sqlite3 /var/www/db/acl.db '.dump' > acl-before.sql
+-- Use the Issabel Security UI when possible. Never execute guessed INSERTs from
+-- this file, and do not grant unrelated Call Center resources.

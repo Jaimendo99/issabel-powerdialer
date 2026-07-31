@@ -20,6 +20,17 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$DB_NAME" in
+  ''|*[!A-Za-z0-9_]*) echo "Unsafe database name: $DB_NAME" >&2; exit 2 ;;
+esac
+case "$DB_PORT" in
+  ''|*[!0-9]*) echo "Invalid database port: $DB_PORT" >&2; exit 2 ;;
+esac
+if [ "$DB_PORT" -lt 1 ] || [ "$DB_PORT" -gt 65535 ]; then
+  echo "Invalid database port: $DB_PORT" >&2
+  exit 2
+fi
+
 TARGET="$MODULE_ROOT/gestion_clientes"
 case "$TARGET" in
   /|/var|/var/www|/var/www/html|/var/www/html/modules|""|.)
@@ -42,3 +53,6 @@ if [ "$PURGE" -eq 1 ]; then
 else
   echo "Database $DB_NAME preserved."
 fi
+
+echo "Menu/ACL rows, cron, Asterisk includes, secrets and uploads are not removed automatically."
+echo "Use docs/rollback.md and the deployment backup to remove or restore those artifacts."

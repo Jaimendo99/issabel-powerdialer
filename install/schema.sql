@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   UNIQUE KEY uq_gc_attempt_idempotency (agent_map_id, idempotency_key),
   KEY idx_gc_attempt_agent_date (agent_map_id, requested_at, technical_state),
   KEY idx_gc_attempt_outcome_date (business_outcome_id, requested_at),
-  KEY idx_gc_attempt_correlation (cdr_accountcode),
+  UNIQUE KEY uq_gc_attempt_cdr_accountcode (cdr_accountcode),
   KEY idx_gc_attempt_unreconciled (reconciled_at, requested_at),
   CONSTRAINT fk_gc_attempt_campaign FOREIGN KEY (campaign_id) REFERENCES gc_campaign(id),
   CONSTRAINT fk_gc_attempt_client FOREIGN KEY (client_id) REFERENCES gc_client(id),

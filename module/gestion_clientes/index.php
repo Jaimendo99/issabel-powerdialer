@@ -110,7 +110,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
         $attempt = $client ? $db->fetchOne('SELECT * FROM gc_attempt WHERE client_id=? AND agent_map_id=? ORDER BY id DESC LIMIT 1', array($client['id'], $agent['id'])) : array();
         $campaignId = $client ? $client['campaign_id'] : 0;
         $outcomes = $db->fetchAll('SELECT * FROM gc_outcome WHERE active=1 AND (campaign_id IS NULL OR campaign_id=?) ORDER BY campaign_id DESC, display_order, id', array($campaignId));
-        gc_assign($smarty, array('title' => 'Mi cartera', 'csrf_token' => $csrf, 'agent' => array('name' => $agent['issabel_username'], 'extension' => $agent['sip_extension'], 'mapped' => 1), 'client' => $viewClient, 'attempt' => $attempt, 'outcomes' => $outcomes, 'claim_url' => $base . '&action=workspace', 'start_call_url' => $base . '&action=api_start_call&rawmode=yes', 'save_outcome_url' => $base . '&action=api_save_outcome&rawmode=yes', 'call_idempotency_key' => $db->uuid(), 'outcome_idempotency_key' => $db->uuid(), 'claim_idempotency_key' => $db->uuid(), 'can_disposition' => $attempt ? 1 : 0));
+        gc_assign($smarty, array('title' => 'Mi cartera', 'csrf_token' => $csrf, 'agent' => array('name' => $agent['issabel_username'], 'extension' => $agent['sip_extension'], 'mapped' => 1), 'client' => $viewClient, 'attempt' => $attempt, 'outcomes' => $outcomes, 'claim_url' => $base . '&action=workspace', 'start_call_url' => $base . '&action=api_start_call&rawmode=yes', 'save_outcome_url' => $base . '&action=api_save_outcome&rawmode=yes', 'status_url' => $base . '&action=api_attempt_status&rawmode=yes', 'call_idempotency_key' => $db->uuid(), 'outcome_idempotency_key' => $db->uuid(), 'claim_idempotency_key' => $db->uuid(), 'can_disposition' => $attempt && !empty($attempt['ended_at']) ? 1 : 0));
         return gc_render($smarty, 'agent_workspace.tpl');
     }
 
@@ -118,7 +118,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
         $agentId = null;
         if (!$auth->isSupervisor($username)) { $agentId = $auth->agentMap(false)['id']; }
         $rows = $admin->callbacks($agentId);
-        foreach ($rows as &$row) { $row['scheduled_at'] = $row['due_at_utc']; $row['agent_name'] = $row['agent_number']; $row['open_url'] = $base . '&action=workspace'; }
+        foreach ($rows as &$row) { $row['scheduled_at'] = gc_utc_to_local($row['due_at_utc'], $row['timezone']); $row['agent_name'] = $row['agent_number']; $row['open_url'] = $base . '&action=workspace'; }
         gc_assign($smarty, array('callbacks' => $rows));
         return gc_render($smarty, 'callbacks.tpl');
     }
@@ -192,13 +192,17 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
     if ($action === 'dashboard' || $action === 'export_csv') {
         $campaignId = (int)gc_param('campaign_id', 0);
         if (!$campaignId) { $first = $db->fetchOne('SELECT id FROM gc_campaign ORDER BY id LIMIT 1', array()); $campaignId = $first ? $first['id'] : 0; }
-        $from = gc_param('from', gmdate('Y-m-01')) . ' 00:00:00';
-        $to = gc_param('to', gmdate('Y-m-d', strtotime('+1 day'))) . ' 00:00:00';
+        $localToday = new DateTime('now', new DateTimeZone($config['timezone']));
+        $fromDate = gc_param('from', $localToday->format('Y-m-01'));
+        $localToday->modify('+1 day');
+        $toDate = gc_param('to', $localToday->format('Y-m-d'));
+        $from = gc_local_date_to_utc($fromDate, $config['timezone']);
+        $to = gc_local_date_to_utc($toDate, $config['timezone']);
         $stats = new GestionClientesStats($db);
         $summary = $stats->campaignSummary($campaignId, $from, $to);
         if ($action === 'export_csv') { return gc_csv_export($summary); }
         $metrics = array(); foreach ($summary as $key => $value) { $metrics[] = array('label' => ucfirst(str_replace('_', ' ', $key)), 'value' => (int)$value, 'scope' => in_array($key, array('total_calls','answered','not_answered','talk_seconds','rejected'), true) ? 'Período' : 'Actual'); }
-        gc_assign($smarty, array('metrics' => $metrics, 'filters' => array('from' => substr($from, 0, 10), 'to' => substr($to, 0, 10)), 'timezone' => $config['timezone'], 'export_url' => $base . '&action=export_csv&campaign_id=' . $campaignId . '&from=' . urlencode(substr($from,0,10)) . '&to=' . urlencode(substr($to,0,10)), 'tables' => array(array('title' => 'Progreso por agente', 'columns' => array(array('key'=>'agent_number','label'=>'Agente'),array('key'=>'assigned_total','label'=>'Asignados'),array('key'=>'managed','label'=>'Gestionados'),array('key'=>'progress_percent','label'=>'%')), 'rows' => $stats->agentProgress($campaignId)), array('title'=>'Resultados comerciales','columns'=>array(array('key'=>'label','label'=>'Resultado'),array('key'=>'total','label'=>'Total')), 'rows'=>$stats->outcomeBreakdown($campaignId,$from,$to)))));
+        gc_assign($smarty, array('metrics' => $metrics, 'filters' => array('from' => $fromDate, 'to' => $toDate), 'timezone' => $config['timezone'], 'export_url' => $base . '&action=export_csv&campaign_id=' . $campaignId . '&from=' . urlencode($fromDate) . '&to=' . urlencode($toDate), 'tables' => array(array('title' => 'Progreso por agente', 'columns' => array(array('key'=>'agent_number','label'=>'Agente'),array('key'=>'assigned_total','label'=>'Asignados'),array('key'=>'managed','label'=>'Gestionados'),array('key'=>'progress_percent','label'=>'%')), 'rows' => $stats->agentProgress($campaignId)), array('title'=>'Resultados comerciales','columns'=>array(array('key'=>'label','label'=>'Resultado'),array('key'=>'total','label'=>'Total')), 'rows'=>$stats->outcomeBreakdown($campaignId,$from,$to)))));
         return gc_render($smarty, 'dashboard.tpl');
     }
     if ($action === 'audit_view') {
@@ -210,7 +214,7 @@ function gc_dispatch($action, &$smarty, $db, $auth, $config, $username, $request
 
     $campaigns = $admin->campaigns(gc_param('q', ''), gc_param('status', ''));
     foreach ($campaigns as &$campaign) { $campaign['total']=$campaign['client_count']; $campaign['managed']=$db->fetchOne('SELECT COUNT(*) AS n FROM gc_client WHERE campaign_id=? AND terminal=1', array($campaign['id']))['n']; $campaign['progress']=$campaign['total'] ? round(100*$campaign['managed']/$campaign['total'],1).'%' : '0%'; $campaign['edit_url']=$base.'&action=campaign_edit&id='.$campaign['id']; $campaign['workspace_url']=$base.'&action=dashboard&campaign_id='.$campaign['id']; }
-    gc_assign($smarty, array('campaigns'=>$campaigns, 'filters'=>array('q'=>gc_param('q',''),'status'=>gc_param('status','')), 'statuses'=>gc_statuses(), 'create_url'=>$base.'&action=campaign_create'));
+    gc_assign($smarty, array('campaigns'=>$campaigns, 'filters'=>array('q'=>gc_param('q',''),'status'=>gc_param('status','')), 'statuses'=>gc_statuses(), 'create_url'=>$base.'&action=campaign_create', 'import_url'=>$base.'&action=import_upload', 'assignment_url'=>$base.'&action=assignment_preview', 'mapping_url'=>$base.'&action=agent_mapping', 'callbacks_url'=>$base.'&action=callbacks', 'audit_url'=>$base.'&action=audit_view'));
     return gc_render($smarty, 'campaign_list.tpl');
 }
 
@@ -227,4 +231,6 @@ function gc_client_view($client) { $phones=array(); foreach($client['phones'] as
 function gc_store_upload($config) { if(empty($_FILES['csv_file']) || $_FILES['csv_file']['error']!==UPLOAD_ERR_OK) throw new RuntimeException('UPLOAD_FAILED'); if($_FILES['csv_file']['size']>$config['max_upload_bytes']) throw new RuntimeException('UPLOAD_TOO_LARGE'); $name=basename($_FILES['csv_file']['name']); if(strtolower(pathinfo($name,PATHINFO_EXTENSION))!=='csv') throw new RuntimeException('UPLOAD_TYPE_INVALID'); if(function_exists('finfo_open')){$f=finfo_open(FILEINFO_MIME_TYPE);$mime=finfo_file($f,$_FILES['csv_file']['tmp_name']);finfo_close($f);if(!in_array($mime,array('text/plain','text/csv','application/csv','application/vnd.ms-excel','application/octet-stream'),true))throw new RuntimeException('UPLOAD_TYPE_INVALID');} $dir=$config['upload_dir']; if(!is_dir($dir) && !mkdir($dir,0700,true)) throw new RuntimeException('UPLOAD_DIR_FAILED'); $bytes=function_exists('openssl_random_pseudo_bytes')?openssl_random_pseudo_bytes(16):md5(uniqid('',true),true); $token=bin2hex($bytes); $path=$dir.'/'.$token.'.csv'; if(!move_uploaded_file($_FILES['csv_file']['tmp_name'],$path)) throw new RuntimeException('UPLOAD_FAILED'); chmod($path,0600); return array('token'=>$token,'path'=>$path,'name'=>$name); }
 function gc_import_rows($preview) { $rows=array(); $n=0; foreach($preview['sample'] as $c){$n++;$numbers=array();foreach($c['phones'] as $p)$numbers[]=$p['original'];$rows[]=array('number'=>$n,'external_id'=>$c['external_key'],'name'=>$c['display_name'],'phones'=>implode(', ',$numbers),'valid'=>1,'message'=>'Válido');} foreach($preview['errors'] as $e){$rows[]=array('number'=>$e['row'],'external_id'=>'','name'=>'','phones'=>'','valid'=>0,'message'=>$e['message']);} return $rows; }
 function gc_csv_export($summary) { if(!headers_sent()){header('Content-Type: text/csv; charset=UTF-8');header('Content-Disposition: attachment; filename="gestion-clientes.csv"');} $out="metric,value\r\n";foreach($summary as $k=>$v)$out.='"'.str_replace('"','""',$k).'",'.(int)$v."\r\n";return $out; }
+function gc_utc_to_local($value,$timezone) { try{$date=new DateTime($value,new DateTimeZone('UTC'));$date->setTimezone(new DateTimeZone($timezone));return $date->format('Y-m-d H:i');}catch(Exception $e){return $value;} }
+function gc_local_date_to_utc($value,$timezone) { if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$value))throw new InvalidArgumentException('INVALID_DATE'); try{$date=DateTime::createFromFormat('!Y-m-d',$value,new DateTimeZone($timezone));if(!$date || $date->format('Y-m-d')!==$value)throw new Exception('invalid');$date->setTimezone(new DateTimeZone('UTC'));return $date->format('Y-m-d H:i:s');}catch(Exception $e){throw new InvalidArgumentException('INVALID_DATE');} }
 function gc_once($db,$actor,$action,$key,$callback) { $cached=$db->idempotentResponse($actor,$action,$key); if($cached!==null)return $cached; try{$db->reserveIdempotency($actor,$action,$key);}catch(Exception $e){$cached=$db->idempotentResponse($actor,$action,$key);if($cached!==null)return $cached;throw new RuntimeException('REQUEST_IN_PROGRESS');} try{$result=call_user_func($callback);$db->completeIdempotency($actor,$action,$key,$result);return $result;}catch(Exception $e){$db->execute('DELETE FROM gc_idempotency WHERE actor_username=? AND action_name=? AND idempotency_key=? AND response_json IS NULL',array($actor,$action,$key));throw $e;} }

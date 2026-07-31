@@ -1,4 +1,4 @@
-<div class="gc-module gc-workspace" data-gc-workspace="1" data-status-url="{$status_url|default:''|escape:'html'}">
+<div class="gc-module gc-workspace" data-gc-workspace="1" data-status-url="{$status_url|default:''|escape:'html'}" data-attempt-id="{$attempt.id|default:''|escape:'html'}">
 <div class="gc-heading"><h2>{$title|default:'Mi cartera'|escape:'html'}</h2><span class="gc-agent">{$agent.name|default:''|escape:'html'} · {$agent.extension|default:''|escape:'html'}</span></div>
 {if $message|default:''}<div class="gc-alert gc-alert-info">{$message|escape:'html'}</div>{/if}{if !$agent.mapped|default:1}<div class="gc-alert gc-alert-error">{$label_unmapped|default:'Su usuario no tiene un agente y extensión válidos asignados.'|escape:'html'}</div>{/if}
 {if $client|default:array()}<section class="gc-card"><div class="gc-heading"><div><h3>{$client.name|default:'Sin nombre'|escape:'html'}</h3><small>{$label_client_id|default:'Cliente'|escape:'html'}: {$client.external_id|default:$client.id|default:''|escape:'html'}</small></div><span class="gc-badge">{$client.state_label|default:$client.state|default:''|escape:'html'}</span></div>

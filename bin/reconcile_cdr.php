@@ -34,6 +34,10 @@ if (!preg_match('/^[A-Za-z0-9_]{1,64}$/', $cdrTable)) { fwrite(STDERR, "Invalid 
 $linkedIdColumn = isset($config['cdr_linkedid_column']) ? $config['cdr_linkedid_column'] : 'linkedid';
 if ($linkedIdColumn !== '' && !preg_match('/^[A-Za-z0-9_]{1,64}$/', $linkedIdColumn)) { fwrite(STDERR, "Invalid linkedid column\n"); exit(2); }
 $linkedIdSelect = $linkedIdColumn === '' ? "'' AS linkedid" : '`' . $linkedIdColumn . '` AS linkedid';
+$cdrTimezoneName = isset($config['cdr_timezone']) ? $config['cdr_timezone'] : 'UTC';
+try { $cdrTimezone = new DateTimeZone($cdrTimezoneName); }
+catch (Exception $e) { fwrite(STDERR, "Invalid CDR timezone\n"); exit(2); }
+$utcTimezone = new DateTimeZone('UTC');
 $pdoOptions = array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC);
 try {
     $db = new PDO($appDsn, isset($app['user']) ? $app['user'] : gc_env('GC_DB_USER', ''), isset($app['password']) ? $app['password'] : gc_env('GC_DB_PASSWORD', ''), $pdoOptions);
@@ -60,11 +64,12 @@ foreach ($attempts as $attempt) {
     foreach ($rows as $row) if (!empty($row['linkedid'])) $linked[$row['linkedid']] = true;
     $ambiguous = count($linked) > 1;
     $candidates = array();
+    $normalizedDigits = preg_replace('/\D+/', '', $attempt['normalized_value']);
     foreach ($rows as $row) {
         $digits = preg_replace('/\D+/', '', isset($row['dst']) ? $row['dst'] : '');
-        if ($digits === preg_replace('/\D+/', '', $attempt['normalized_value'])) $candidates[] = $row;
+        if ($digits === $normalizedDigits || (strlen($digits) >= 9 && substr($digits, -9) === substr($normalizedDigits, -9))) $candidates[] = $row;
     }
-    if (!$candidates) $ambiguous = true;
+    if (!$candidates && count($rows) > 1) $ambiguous = true;
     $source = $candidates ? $candidates : $rows;
     $state = 'FAILED'; $duration = 0; $talk = 0; $uniqueid = null; $linkedid = null; $recording = null; $answeredAt = null; $endedAt = null;
     $rank = array('FAILED'=>1, 'NO_ANSWER'=>2, 'BUSY'=>3, 'ANSWERED'=>4);
@@ -73,9 +78,12 @@ foreach ($attempts as $attempt) {
         $candidateState = $disp === 'ANSWERED' ? 'ANSWERED' : ($disp === 'BUSY' ? 'BUSY' : (($disp === 'NO_ANSWER' || $disp === 'NOANSWER') ? 'NO_ANSWER' : 'FAILED'));
         if ($rank[$candidateState] >= $rank[$state]) { $state = $candidateState; $uniqueid = $row['uniqueid']; $linkedid = $row['linkedid']; }
         $duration = max($duration, (int)$row['duration']); $talk = max($talk, (int)$row['billsec']);
-        $rowEnd = gmdate('Y-m-d H:i:s', strtotime($row['calldate'] . ' UTC') + (int)$row['duration']);
+        $rowStart = new DateTime($row['calldate'], $cdrTimezone);
+        $rowStart->setTimezone($utcTimezone);
+        $rowStartEpoch = $rowStart->getTimestamp();
+        $rowEnd = gmdate('Y-m-d H:i:s', $rowStartEpoch + (int)$row['duration']);
         if ($endedAt === null || $rowEnd > $endedAt) $endedAt = $rowEnd;
-        if ($candidateState === 'ANSWERED' && $answeredAt === null) $answeredAt = gmdate('Y-m-d H:i:s', strtotime($row['calldate'] . ' UTC') + max(0, (int)$row['duration'] - (int)$row['billsec']));
+        if ($candidateState === 'ANSWERED' && $answeredAt === null) $answeredAt = gmdate('Y-m-d H:i:s', $rowStartEpoch + max(0, (int)$row['duration'] - (int)$row['billsec']));
         if (!empty($row['recordingfile'])) $recording = $row['recordingfile'];
     }
     if ($ambiguous) { $state = 'AMBIGUOUS'; $counts['ambiguous']++; }

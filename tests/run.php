@@ -112,6 +112,20 @@ test_case('CSV import preserves multiple phone order and deduplicates normalized
     assert_same('telefono_principal', $preview['sample'][0]['phones'][0]['type'], 'Deduplication must retain the first field label');
 });
 
+test_case('CSV import expands a semicolon phone list into grouped client phones', function () {
+    gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
+    gc_require_class('GestionClientesImport', 'module/gestion_clientes/libs/GestionClientesImport.class.php');
+    $import = new GestionClientesImport(null);
+    $mapping = array('external_id' => 'cliente', 'display_name' => 'cliente', 'phones' => array('numeros'));
+    $preview = $import->preview(GC_PROJECT_ROOT . '/tests/fixtures/clients-phone-list.csv', $mapping, 0);
+    assert_same(2, $preview['accepted'], 'One CSV row must remain one grouped client');
+    assert_same(2, count($preview['sample'][0]['phones']), 'Equivalent numbers inside the same cell must be deduplicated');
+    assert_same('+593991234567', $preview['sample'][0]['phones'][0]['normalized'], 'The first cell number must remain first');
+    assert_same('+593987654321', $preview['sample'][0]['phones'][1]['normalized'], 'The second distinct cell number must remain attached to the client');
+    assert_same('numeros 1', $preview['sample'][0]['phones'][0]['type'], 'Expanded phone labels must identify their cell position');
+    assert_same('numeros 3', $preview['sample'][0]['phones'][1]['type'], 'Deduplication must preserve the original cell position in the label');
+});
+
 test_case('schema contains concurrency and idempotency safeguards', function () {
     $sql = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
     assert_true(strpos($sql, 'UNIQUE KEY uq_gc_attempt_idempotency') !== false, 'Attempt idempotency constraint is missing');

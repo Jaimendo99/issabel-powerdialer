@@ -155,11 +155,17 @@ class GestionClientesImport
             $phoneFields = isset($mapping['phones']) && is_array($mapping['phones']) ? $mapping['phones'] : array();
             $seenPhones = array();
             foreach ($phoneFields as $phoneField) {
-                $original = isset($data[$phoneField]) ? trim($data[$phoneField]) : '';
-                $normalized = GestionClientesValidator::normalizePhone($original);
-                if ($normalized !== null && !isset($seenPhones[$normalized])) {
-                    $seenPhones[$normalized] = true;
-                    $phones[] = array('original' => $original, 'normalized' => $normalized, 'type' => $phoneField);
+                $cell = isset($data[$phoneField]) ? trim($data[$phoneField]) : '';
+                $values = $cell === '' ? array() : preg_split('/\s*;\s*/', $cell);
+                $valueCount = count($values);
+                foreach ($values as $valueIndex => $original) {
+                    $original = trim($original);
+                    $normalized = GestionClientesValidator::normalizePhone($original);
+                    if ($normalized !== null && !isset($seenPhones[$normalized])) {
+                        $seenPhones[$normalized] = true;
+                        $phoneType = $valueCount > 1 ? $phoneField . ' ' . ($valueIndex + 1) : $phoneField;
+                        $phones[] = array('original' => $original, 'normalized' => $normalized, 'type' => substr($phoneType, 0, 40));
+                    }
                 }
             }
             if (!count($phones)) {

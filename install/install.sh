@@ -64,6 +64,11 @@ STAGE="$MODULE_ROOT/.gestion_clientes.stage.$$"
 trap 'if [ -n "$STAGE" ] && [ -d "$STAGE" ]; then rm -rf "$STAGE"; fi' 0 1 2 3 15
 mkdir "$STAGE"
 cp -R "$PROJECT_DIR/module/gestion_clientes/." "$STAGE/"
+# The source archive may inherit a restrictive deployment umask (0640/0750).
+# Module code contains no secrets; make it consistently readable/traversable by
+# the Issabel web worker regardless of its runtime group.
+find "$STAGE" -type d -exec chmod 0755 {} \;
+find "$STAGE" -type f -exec chmod 0644 {} \;
 
 TARGET="$MODULE_ROOT/gestion_clientes"
 PREVIOUS=

@@ -36,7 +36,7 @@ class GestionClientesWorkflow
                 return $self->hydrateClient($existing);
             }
             $client = $tx->fetchOne(
-                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL AND (c.state<>\'CALLBACK\' OR EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP())) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()) THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
+                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND c.state IN (\'PENDING\',\'NO_CONTACT\',\'CALLBACK\') AND cl.client_id IS NULL AND (c.state<>\'CALLBACK\' OR EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP())) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()) THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
                 array($agentMapId)
             );
             if (!$client) {
@@ -151,6 +151,10 @@ class GestionClientesWorkflow
                 throw new RuntimeException('ATTEMPT_OWNERSHIP_INVALID');
             }
             if ($attempt['business_outcome_id'] !== null) {
+                $retryNote = trim($note);
+                if ((int)$attempt['business_outcome_id'] === (int)$outcomeId && trim((string)$attempt['agent_note']) === '' && $retryNote !== '') {
+                    $tx->execute('UPDATE gc_attempt SET agent_note=? WHERE id=? AND (agent_note IS NULL OR agent_note=\'\')', array($retryNote, $attemptId));
+                }
                 return array('attempt_id' => (int)$attemptId, 'already_saved' => true);
             }
             if ($attempt['ended_at'] === null || !in_array($attempt['technical_state'], array('ANSWERED','BUSY','NO_ANSWER','FAILED','CANCELED','AMBIGUOUS'), true)) {

@@ -126,6 +126,12 @@ test_case('call origination has durable duplicate and correlation safeguards', f
     assert_true(strpos($workflow, 'ATTEMPT_NOT_FINISHED') !== false, 'Business outcomes must be gated until the technical attempt ends');
 });
 
+test_case('queue does not immediately reclaim follow-up outcome states', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    assert_true(strpos($workflow, "c.state IN (\\'PENDING\\',\\'NO_CONTACT\\',\\'CALLBACK\\')") !== false, 'Claim queue must only include immediately actionable client states');
+    assert_true(strpos($workflow, "agent_note IS NULL OR agent_note=\\'\\'") !== false, 'An idempotent outcome retry must be able to restore a note omitted by the first browser request');
+});
+
 test_case('Asterisk 11 dialplan derives its compact CDR key from the attempt UUID', function () {
     $dialplan = file_get_contents(GC_PROJECT_ROOT . '/asterisk/extensions_gestion_clientes.conf');
     assert_true(strpos($dialplan, 'FILTER(0-9a-fA-F,${GC_ATTEMPT_ID})') !== false, 'Dialplan must derive the compact CDR key from the validated attempt UUID');

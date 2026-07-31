@@ -1,0 +1,3 @@
+-- Template: adapt to the verified Issabel ACL schema.
+-- Resources: view, import, assign, call, report, export, administer.
+-- No statement is executed automatically because Issabel 4 installations differ.

@@ -1,0 +1,11 @@
+; Copy manually to the installation's manager custom include after review.
+; Replace the secret, keep the file root:asterisk 0640, and reload only in an
+; approved maintenance window.  The web process must connect through localhost.
+[gestion_clientes]
+secret = REPLACE_WITH_A_LONG_RANDOM_SECRET
+deny = 0.0.0.0/0.0.0.0
+permit = 127.0.0.1/255.255.255.255
+read = system,call
+write = originate
+writetimeout = 5000
+displayconnects = no

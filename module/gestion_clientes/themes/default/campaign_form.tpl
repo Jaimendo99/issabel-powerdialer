@@ -1,0 +1,10 @@
+<div class="gc-module"><h2>{$title|default:'Campaña'|escape:'html'}</h2>
+{if $errors|default:array()}<div class="gc-alert gc-alert-error"><ul>{foreach from=$errors item=e}<li>{$e|escape:'html'}</li>{/foreach}</ul></div>{/if}
+<form method="post" action="{$action_url|default:''|escape:'html'}" class="gc-form"><input type="hidden" name="csrf_token" value="{$csrf_token|default:''|escape:'html'}" /><input type="hidden" name="id" value="{$campaign.id|default:''|escape:'html'}" /><input type="hidden" name="idempotency_key" value="{$idempotency_key|default:''|escape:'html'}" />
+<fieldset><legend>{$label_general|default:'Datos generales'|escape:'html'}</legend>
+<label>{$label_name|default:'Nombre'|escape:'html'} <input required="required" maxlength="120" type="text" name="name" value="{$campaign.name|default:''|escape:'html'}" /></label>
+<label>{$label_status|default:'Estado'|escape:'html'} <select name="status">{foreach from=$statuses|default:array() item=s}<option value="{$s.value|default:''|escape:'html'}"{if $campaign.status|default:'' == $s.value|default:''} selected="selected"{/if}>{$s.label|default:''|escape:'html'}</option>{/foreach}</select></label>
+<label>{$label_timezone|default:'Zona horaria'|escape:'html'} <input required="required" type="text" name="timezone" value="{$campaign.timezone|default:'America/Guayaquil'|escape:'html'}" /></label>
+<label>{$label_context|default:'Contexto saliente'|escape:'html'} <input type="text" name="outbound_context" value="{$campaign.outbound_context|default:'gestion-clientes-outbound'|escape:'html'}" /></label>
+<label class="gc-check"><input type="checkbox" name="auto_next" value="1"{if $campaign.auto_next|default:0} checked="checked"{/if} /> {$label_auto_next|default:'Permitir avance automático'|escape:'html'}</label></fieldset>
+<div class="gc-actions"><button type="submit">{$label_save|default:'Guardar'|escape:'html'}</button><a href="{$cancel_url|default:'?menu=gestion_clientes'|escape:'html'}">{$label_cancel|default:'Cancelar'|escape:'html'}</a></div></form></div>

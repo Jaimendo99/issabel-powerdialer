@@ -1,0 +1,5 @@
+id;nombre;telefono;telefono_alterno
+CLI-1;Ana;099 123 4567;
+CLI-2;Bob;invalid;+1 (202) 555-0123
+CLI-2;Duplicate;0987654321;
+CLI-3;No phone;not-a-phone;

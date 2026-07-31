@@ -1,0 +1,8 @@
+<h2>Client Management</h2>
+<p>This module imports and assigns clients, starts calls through the agent extension, records outcomes, and reports operational metrics.</p>
+<h3>Agents</h3>
+<ol><li>Open <strong>My portfolio</strong> and claim the next client.</li><li>Select a phone and press <strong>Call</strong>. Answer your extension first.</li><li>When the call ends, select an outcome, add a note, and save before continuing.</li><li>If the outcome requires a callback, enter its date, time, and time zone.</li></ol>
+<p>Due and overdue callbacks are prioritized. Do not repeat a call when an active-attempt or reconciliation error is shown; give the request ID to your supervisor.</p>
+<h3>Supervisors</h3>
+<ol><li>Create the campaign and configure its time zone and outbound context.</li><li>Import the CSV and review invalid or duplicate rows before confirming.</li><li>Verify the user, agent, and extension mapping.</li><li>Preview the distribution before confirming assignments.</li><li>Use the dashboard and audit screens to review progress, callbacks, and rejected calls.</li></ol>
+<p>Technical metrics depend on CDR reconciliation and may update after a call has ended.</p>

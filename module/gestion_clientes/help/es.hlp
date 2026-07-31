@@ -1,0 +1,8 @@
+<h2>Gestión de Clientes</h2>
+<p>Este módulo permite importar y asignar clientes, iniciar llamadas desde la extensión del agente, registrar resultados y consultar indicadores operativos.</p>
+<h3>Agentes</h3>
+<ol><li>Abra <strong>Mi cartera</strong> y tome el siguiente cliente.</li><li>Seleccione un teléfono y pulse <strong>Llamar</strong>. Conteste primero su extensión.</li><li>Al terminar, seleccione un resultado, agregue una nota y guarde antes de avanzar.</li><li>Si el resultado requiere callback, indique fecha, hora y zona horaria.</li></ol>
+<p>Los callbacks vencidos y del día tienen prioridad. No repita una llamada si aparece un intento activo o un error de reconciliación; entregue el ID de solicitud al supervisor.</p>
+<h3>Supervisores</h3>
+<ol><li>Cree la campaña y configure su zona horaria y contexto saliente.</li><li>Importe el CSV y revise filas inválidas o duplicadas antes de confirmar.</li><li>Verifique el mapeo de usuario, agente y extensión.</li><li>Previsualice la distribución antes de confirmar la asignación.</li><li>Use el panel y la auditoría para revisar progreso, callbacks y llamadas rechazadas.</li></ol>
+<p>Los indicadores técnicos dependen de la reconciliación con CDR y pueden actualizarse después de finalizar una llamada.</p>

@@ -1,0 +1,2 @@
+NUMERO;IDENTIFICACION;CLIENTE;Cuenta Contrato;Direccion;Latitud;Longitud;Pagado mes anterior ($);Canton;Parroquia;Valor última Factura;cov_Name;coverage_distance_m;coverage_inside;FECHA_NACIM;numeros_contacto;offering_contacto;is_fijo;servicios_fijo;offering_fijo;deuda_total;cliente_bueno;deuda_source;monto_total_recargas
+0999999999;9999999999999;CLIENTE SINTÉTICO DE PRUEBA;TEST-0001;DIRECCIÓN DE PRUEBA;-0.9447;-80.7344;38.95;MANTA;MANTA;40.88;TEST-COVERAGE;0.0;True;;;;False;;;False;sin_datos;

@@ -41,7 +41,11 @@ class GestionClientesDialer
             $errno, $error, (float)$this->config['connect_timeout']);
         if (!$this->socket) throw new RuntimeException('AMI connection failed (' . $errno . ')');
         stream_set_timeout($this->socket, (int)$this->config['read_timeout']);
-        $this->readMessage(); // banner
+        $banner = fgets($this->socket, 4096);
+        if ($banner === false || strpos($banner, 'Asterisk Call Manager/') !== 0) {
+            $this->close();
+            throw new RuntimeException('Invalid AMI banner');
+        }
         $reply = $this->action(array('Action' => 'Login',
             'Username' => $this->config['username'], 'Secret' => $this->config['secret'],
             'Events' => 'off'));

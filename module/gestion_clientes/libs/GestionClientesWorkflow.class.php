@@ -71,7 +71,7 @@ class GestionClientesWorkflow
                 return $existing;
             }
             $row = $tx->fetchOne(
-                'SELECT c.campaign_id, c.terminal, a.id AS assignment_id, p.normalized_value, p.state AS phone_state FROM gc_client c JOIN gc_assignment a ON a.client_id=c.id AND a.assignment_state=\'ACTIVE\' JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.assignment_id=a.id JOIN gc_client_phone p ON p.client_id=c.id WHERE c.id=? AND p.id=? AND a.agent_map_id=? AND cl.claim_token=? AND cl.expires_at>UTC_TIMESTAMP() FOR UPDATE',
+                'SELECT c.campaign_id,c.terminal,c.last_attempt_at AS client_last_attempt_at,a.id AS assignment_id,p.normalized_value,p.state AS phone_state,p.attempt_count AS phone_attempt_count,p.last_attempt_at AS phone_last_attempt_at FROM gc_client c JOIN gc_assignment a ON a.client_id=c.id AND a.assignment_state=\'ACTIVE\' JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.assignment_id=a.id JOIN gc_client_phone p ON p.client_id=c.id WHERE c.id=? AND p.id=? AND a.agent_map_id=? AND cl.claim_token=? AND cl.expires_at>UTC_TIMESTAMP() FOR UPDATE',
                 array($clientId, $phoneId, $agent['id'], $claimToken)
             );
             if (!$row || (int)$row['terminal'] === 1) {
@@ -104,8 +104,9 @@ class GestionClientesWorkflow
             // Enforce the immediately preceding finished call. Older historical
             // rows may predate disposition enforcement and must not deadlock an
             // upgraded installation after a newer call was already resolved.
-            $previousFinished = $tx->fetchOne('SELECT id, business_outcome_id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1', array($agent['id']));
-            if ($previousFinished && $previousFinished['business_outcome_id'] === null) {
+            $previousFinished = $tx->fetchOne('SELECT id,business_outcome_id,raw_error_code FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1', array($agent['id']));
+            $agentOnlyFailure = $previousFinished && strpos((string)$previousFinished['raw_error_code'], 'AMI_AGENT_') === 0;
+            if ($previousFinished && $previousFinished['business_outcome_id'] === null && !$agentOnlyFailure) {
                 throw new RuntimeException('OUTCOME_REQUIRED_BEFORE_CALL');
             }
             $token = $tx->uuid();
@@ -120,7 +121,7 @@ class GestionClientesWorkflow
             $tx->execute('UPDATE gc_client_phone SET state=\'ATTEMPTED\', attempt_count=attempt_count+1, last_attempt_at=UTC_TIMESTAMP() WHERE id=?', array($phoneId));
             $tx->execute('UPDATE gc_client SET last_attempt_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?', array($clientId));
             $tx->audit($clientId, $actor, 'CALL_REQUESTED', 'IN_PROGRESS', 'IN_PROGRESS', array('attempt_id' => $attemptId, 'phone_id' => $phoneId, 'sip_extension' => $seat['sip_extension']), $ip);
-            return array('id' => $attemptId, 'phone_id' => (int)$phoneId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'agent_sip_extension' => $seat['sip_extension'], 'technical_state' => 'CREATED');
+            return array('id' => $attemptId, 'phone_id' => (int)$phoneId, 'correlation_token' => $token, 'cdr_accountcode' => $account, 'normalized_value' => $row['normalized_value'], 'agent_sip_extension' => $seat['sip_extension'], 'technical_state' => 'CREATED', '_phone_previous_state' => $row['phone_state'], '_phone_previous_count' => (int)$row['phone_attempt_count'], '_phone_previous_last_attempt_at' => $row['phone_last_attempt_at'], '_client_previous_last_attempt_at' => $row['client_last_attempt_at']);
         });
         if (!empty($attempt['_idempotent_replay'])) {
             unset($attempt['_idempotent_replay']);
@@ -131,7 +132,7 @@ class GestionClientesWorkflow
         }
         $dialNumber = GestionClientesValidator::toDialString($attempt['normalized_value']);
         if ($dialNumber === false) {
-            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'INVALID_DIAL_NUMBER\', reconciled_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            $this->closeUncalledAttempt($attempt, 'FAILED', 'INVALID_DIAL_NUMBER', null, false);
             throw new RuntimeException('PHONE_NOT_ELIGIBLE');
         }
         try {
@@ -143,17 +144,47 @@ class GestionClientesWorkflow
             $attempt['technical_state'] = 'AMBIGUOUS';
             throw new RuntimeException('AMI_RESULT_UNKNOWN');
         } catch (Exception $e) {
-            $db->execute('UPDATE gc_attempt SET technical_state=\'FAILED\', ended_at=UTC_TIMESTAMP(), raw_error_code=\'AMI_ORIGINATE_FAILED\', reconciled_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
+            $this->closeUncalledAttempt($attempt, 'FAILED', 'AMI_AGENT_ORIGINATE_FAILED', null, false);
             $attempt['technical_state'] = 'FAILED';
             throw new RuntimeException('AMI_ORIGINATE_FAILED');
         }
         // Keep persistence outside the AMI catch. If this update fails after an
         // accepted Originate, the CREATED row remains an active duplicate guard
         // and CDR reconciliation can still establish the final call state.
-        $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($attempt['id']));
-        $attempt['technical_state'] = 'ORIGINATED';
+        $agentState = isset($result['agent_state']) ? $result['agent_state'] : 'ANSWERED';
+        $amiState = $agentState === 'ANSWERED' ? 'ORIGINATED' : $agentState;
+        if ($agentState === 'ANSWERED') {
+            $db->execute('UPDATE gc_attempt SET technical_state=\'ORIGINATED\', originated_at=UTC_TIMESTAMP(),asterisk_uniqueid=? WHERE id=? AND technical_state=\'CREATED\'', array(isset($result['uniqueid']) ? $result['uniqueid'] : null, $attempt['id']));
+        } else {
+            $terminal = $this->closeUncalledAttempt($attempt, $amiState, isset($result['raw_error_code']) ? $result['raw_error_code'] : 'AMI_AGENT_FAILURE', isset($result['uniqueid']) ? $result['uniqueid'] : null, true);
+            if ($terminal) {
+                $attempt['originated_at'] = $terminal['originated_at'];
+                $attempt['ended_at'] = $terminal['ended_at'];
+                $attempt['reconciled_at'] = $terminal['reconciled_at'];
+                $attempt['raw_error_code'] = $terminal['raw_error_code'];
+            }
+            $attempt['agent_only_failure'] = true;
+            $attempt['outcome_required'] = false;
+        }
+        $attempt['technical_state'] = $amiState;
         $attempt['ami'] = $result;
+        unset($attempt['_phone_previous_state'], $attempt['_phone_previous_count'], $attempt['_phone_previous_last_attempt_at'], $attempt['_client_previous_last_attempt_at']);
         return $attempt;
+    }
+
+    /** Restore pre-call counters and close the attempt as one atomic unit. */
+    private function closeUncalledAttempt($attempt, $technicalState, $rawErrorCode, $uniqueid, $originated)
+    {
+        return $this->db->transaction(function ($tx) use ($attempt, $technicalState, $rawErrorCode, $uniqueid, $originated) {
+            $locked = $tx->fetchOne('SELECT id FROM gc_attempt WHERE id=? AND technical_state=\'CREATED\' FOR UPDATE', array($attempt['id']));
+            if (!$locked) return null;
+            if (isset($attempt['_phone_previous_state'])) {
+                $tx->execute('UPDATE gc_client_phone SET state=?,attempt_count=?,last_attempt_at=? WHERE id=?', array($attempt['_phone_previous_state'], $attempt['_phone_previous_count'], $attempt['_phone_previous_last_attempt_at'], $attempt['phone_id']));
+                $tx->execute('UPDATE gc_client SET last_attempt_at=?,updated_at=UTC_TIMESTAMP(),row_version=row_version+1 WHERE id=(SELECT client_id FROM gc_client_phone WHERE id=?)', array($attempt['_client_previous_last_attempt_at'], $attempt['phone_id']));
+            }
+            $tx->execute('UPDATE gc_attempt SET technical_state=?,originated_at=IF(?,UTC_TIMESTAMP(),NULL),ended_at=UTC_TIMESTAMP(),asterisk_uniqueid=?,raw_error_code=?,reconciled_at=UTC_TIMESTAMP() WHERE id=? AND technical_state=\'CREATED\'', array($technicalState, $originated ? 1 : 0, $uniqueid, $rawErrorCode, $attempt['id']));
+            return $tx->fetchOne('SELECT originated_at,ended_at,reconciled_at,raw_error_code FROM gc_attempt WHERE id=?', array($attempt['id']));
+        });
     }
 
     public function saveOutcome($agentMapId, $attemptId, $outcomeId, $note, $callback, $actor, $ip)
@@ -165,6 +196,9 @@ class GestionClientesWorkflow
             );
             if (!$attempt) {
                 throw new RuntimeException('ATTEMPT_OWNERSHIP_INVALID');
+            }
+            if (strpos((string)$attempt['raw_error_code'], 'AMI_AGENT_') === 0) {
+                throw new RuntimeException('OUTCOME_NOT_APPLICABLE');
             }
             if ($attempt['business_outcome_id'] !== null) {
                 $retryNote = trim($note);
@@ -227,7 +261,7 @@ class GestionClientesWorkflow
         }
         $phones = $this->db->fetchAll('SELECT * FROM gc_client_phone WHERE client_id=? ORDER BY sort_order, id', array($row['id']));
         $lastAttempts = $this->db->fetchAll(
-            'SELECT at.id, at.phone_id, at.requested_at, at.technical_state, at.business_outcome_id, o.code AS outcome_code, o.label AS outcome_label FROM (SELECT phone_id, MAX(id) AS attempt_id FROM gc_attempt WHERE client_id=? GROUP BY phone_id) latest JOIN gc_attempt at ON at.id=latest.attempt_id LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id ORDER BY at.id',
+            'SELECT at.id, at.phone_id, at.requested_at, at.technical_state, at.business_outcome_id, o.code AS outcome_code, o.label AS outcome_label FROM (SELECT phone_id, MAX(id) AS attempt_id FROM gc_attempt WHERE client_id=? AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\') GROUP BY phone_id) latest JOIN gc_attempt at ON at.id=latest.attempt_id LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id ORDER BY at.id',
             array($row['id'])
         );
         $lastByPhone = array();

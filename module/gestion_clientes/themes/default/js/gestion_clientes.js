@@ -34,6 +34,12 @@
         var labels = {CREATED: 'Preparando…', ORIGINATED: 'Llamando…', RINGING: 'Timbrando…', ANSWERED: 'Contestada', BUSY: 'Ocupado', NO_ANSWER: 'Sin respuesta', FAILED: 'Falló', CANCELED: 'Cancelada', AMBIGUOUS: 'Verificando llamada…'};
         return labels[state] || state || '';
     }
+    function agentFailureText(attempt) {
+        var code = attempt && attempt.raw_error_code ? String(attempt.raw_error_code) : '';
+        if (code === 'AMI_AGENT_NO_ANSWER') { return 'La extensión no contestó. Puede intentar nuevamente.'; }
+        if (code === 'AMI_AGENT_BUSY') { return 'La extensión está ocupada. Puede intentar nuevamente.'; }
+        return 'No se pudo conectar con la extensión. Puede intentar nuevamente.';
+    }
     function phoneCard(workspace, phoneId) {
         if (!phoneId || !/^\d+$/.test(String(phoneId))) { return $(); }
         return workspace.find('[data-gc-phone-card][data-phone-id="' + phoneId + '"]').first();
@@ -50,8 +56,12 @@
                 workspace.find('[data-gc-phone-card]').removeClass('gc-phone-calling');
                 if (!response.data.ended_at && card.length) { card.addClass('gc-phone-calling'); }
                 status.text(attemptStateText(response.data.technical_state));
-                if (response.data.ended_at && !response.data.business_outcome_id) {
-                    $('[data-gc-outcome-form] button[type=submit]').prop('disabled', false);
+                if (response.data.ended_at && response.data.agent_only_failure) {
+                    status.text(agentFailureText(response.data));
+                    $('[data-gc-outcome-form]').hide().find('button[type=submit]').prop('disabled', true);
+                    setOutcomeRequired(workspace, false);
+                } else if (response.data.ended_at && response.data.outcome_required) {
+                    $('[data-gc-outcome-form]').show().find('button[type=submit]').prop('disabled', false);
                     $('[data-gc-call-form] button[type=submit]').prop('disabled', true);
                     setOutcomeRequired(workspace, true);
                 } else if (!response.data.ended_at) {
@@ -78,7 +88,7 @@
             var form = $(this), status = form.find('.gc-call-status'),
                 callButtons = $('[data-gc-call-form] button[type=submit]'),
                 enabledButtons = callButtons.filter(':enabled');
-            if (!window.FormData || !form.attr('action')) { return; }
+            if (!form.attr('action')) { return; }
             event.preventDefault();
             callButtons.prop('disabled', true);
             status.text('Procesando…');
@@ -88,9 +98,19 @@
                     if (response && response.ok && response.data && response.data.id) {
                         $('[data-gc-workspace]').attr('data-attempt-id', response.data.id);
                         $('[data-gc-outcome-form] input[name=attempt_id]').val(response.data.id);
-                        form.closest('[data-gc-phone-card]').addClass('gc-phone-calling');
-                        status.text('Llamando…');
-                        window.setTimeout(function () { pollAttempt($('[data-gc-workspace]').first()); }, 3000);
+                        if (response.data.agent_only_failure) {
+                            form.closest('[data-gc-phone-card]').removeClass('gc-phone-calling');
+                            status.text(agentFailureText(response.data));
+                            $('[data-gc-outcome-form]').hide().find('button[type=submit]').prop('disabled', true);
+                            enabledButtons.prop('disabled', false);
+                            form.find('input[name=idempotency_key]').val(idempotencyKey());
+                            setOutcomeRequired(workspace, false);
+                        } else {
+                            $('[data-gc-outcome-form]').show();
+                            form.closest('[data-gc-phone-card]').addClass('gc-phone-calling');
+                            status.text('Llamando…');
+                            window.setTimeout(function () { pollAttempt($('[data-gc-workspace]').first()); }, 3000);
+                        }
                     }
                     if (!response || !response.ok) {
                         if (response && response.code === 'OUTCOME_REQUIRED_BEFORE_CALL') {

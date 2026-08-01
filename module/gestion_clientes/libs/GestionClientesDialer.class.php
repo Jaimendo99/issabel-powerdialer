@@ -19,12 +19,13 @@ class GestionClientesDialer
         $defaults = array(
             'host' => '127.0.0.1', 'port' => 5038, 'connect_timeout' => 3,
             'read_timeout' => 5, 'context' => 'gestion-clientes-outbound',
-            'agent_technology' => 'SIP'
+            'agent_technology' => 'SIP', 'originate_result_timeout' => 35
         );
         $config = is_array($config) ? $config : array();
         $aliases = array('ami_host'=>'host', 'ami_port'=>'port', 'ami_username'=>'username',
             'ami_timeout_seconds'=>'read_timeout', 'sip_technology'=>'agent_technology',
-            'dial_context'=>'context', 'ami_secret_file'=>'secret_file');
+            'dial_context'=>'context', 'ami_secret_file'=>'secret_file',
+            'ami_originate_timeout_seconds'=>'originate_result_timeout');
         foreach ($aliases as $source => $target) {
             if (isset($config[$source]) && !isset($config[$target])) $config[$target] = $config[$source];
         }
@@ -54,7 +55,7 @@ class GestionClientesDialer
         }
         $reply = $this->action(array('Action' => 'Login',
             'Username' => $this->config['username'], 'Secret' => $this->config['secret'],
-            'Events' => 'off'));
+            'Events' => 'call'));
         if (!$this->isSuccess($reply)) {
             $this->close();
             throw new RuntimeException('AMI authentication failed');
@@ -79,7 +80,7 @@ class GestionClientesDialer
         $this->connect();
         $actionId = 'gc-' . str_replace('-', '', $correlationToken);
         try {
-            $reply = $this->action(array(
+            $reply = $this->originateAction(array(
                 'Action' => 'Originate', 'ActionID' => $actionId,
                 'Channel' => $this->config['agent_technology'] . '/' . $agentExtension,
                 'Context' => $dialContext, 'Exten' => $phone, 'Priority' => '1',
@@ -87,7 +88,7 @@ class GestionClientesDialer
                 'Account' => $accountCode,
                 'Variable' => '__GC_ATTEMPT_ID=' . $correlationToken,
                 'Async' => 'true'
-            ), true);
+            ), $actionId);
         } catch (GestionClientesAmiUnknownException $e) {
             throw $e;
         } catch (Exception $e) {
@@ -95,27 +96,93 @@ class GestionClientesDialer
             // can accept Originate, and are therefore safe to classify as rejected.
             throw new GestionClientesAmiRejectedException('Originate was not sent');
         }
-        if (!isset($reply['response'])) {
-            throw new GestionClientesAmiUnknownException('AMI response was incomplete');
+        return $reply;
+    }
+
+    /** Wait for the correlated async OriginateResponse, ignoring other AMI events. */
+    private function originateAction($fields, $actionId)
+    {
+        $payload = $this->buildPayload($fields);
+        $this->writePayload($payload, true);
+        $timeout = max(5, min(45, (int)$this->config['originate_result_timeout']));
+        $deadline = microtime(true) + $timeout;
+        $queued = false;
+        while (microtime(true) < $deadline) {
+            $remaining = $deadline - microtime(true);
+            try {
+                $message = $this->readMessage($remaining);
+            } catch (Exception $e) {
+                throw new GestionClientesAmiUnknownException('AMI Originate response unavailable');
+            }
+            if (!$message) continue;
+            $messageActionId = isset($message['actionid']) ? $message['actionid'] : '';
+            if (isset($message['event']) && strcasecmp($message['event'], 'OriginateResponse') === 0) {
+                if ($messageActionId !== $actionId) continue;
+                $reason = isset($message['reason']) ? (int)$message['reason'] : -1;
+                $success = isset($message['response']) && strcasecmp($message['response'], 'Success') === 0;
+                return array(
+                    'accepted' => true,
+                    'action_id' => $actionId,
+                    'agent_state' => $success ? 'ANSWERED' : $this->stateForOriginateReason($reason),
+                    'reason' => $reason,
+                    'uniqueid' => isset($message['uniqueid']) && $message['uniqueid'] !== '<null>' ? $message['uniqueid'] : null,
+                    'raw_error_code' => $success ? null : $this->errorForOriginateReason($reason)
+                );
+            }
+            if (isset($message['response']) && ($messageActionId === '' || $messageActionId === $actionId)) {
+                if (strcasecmp($message['response'], 'Error') === 0) {
+                    $text = isset($message['message']) ? $message['message'] : 'Originate rejected';
+                    $this->log('AMI originate rejected: ' . $text);
+                    throw new GestionClientesAmiRejectedException('Originate rejected');
+                }
+                if (strcasecmp($message['response'], 'Success') === 0) $queued = true;
+            }
         }
-        if (!$this->isSuccess($reply)) {
-            $message = isset($reply['message']) ? $reply['message'] : 'Originate rejected';
-            $this->log('AMI originate rejected: ' . $message);
-            throw new GestionClientesAmiRejectedException('Originate rejected');
-        }
-        return array('accepted' => true, 'action_id' => $actionId);
+        throw new GestionClientesAmiUnknownException($queued ? 'AMI Originate result timeout' : 'AMI Originate response timeout');
+    }
+
+    private function stateForOriginateReason($reason)
+    {
+        if ($reason === 0 || $reason === 1) return 'NO_ANSWER';
+        if ($reason === 5) return 'BUSY';
+        return 'FAILED';
+    }
+
+    private function errorForOriginateReason($reason)
+    {
+        if ($reason === 0 || $reason === 1) return 'AMI_AGENT_NO_ANSWER';
+        if ($reason === 5) return 'AMI_AGENT_BUSY';
+        if ($reason === 8) return 'AMI_AGENT_CONGESTION';
+        return 'AMI_AGENT_FAILURE_' . (int)$reason;
     }
 
     private function action($fields, $originate = false)
     {
         if (!$this->socket) throw new RuntimeException('AMI is not connected');
+        $payload = $this->buildPayload($fields);
+        $this->writePayload($payload, $originate);
+        try {
+            return $this->readMessage();
+        } catch (Exception $e) {
+            if ($originate) throw new GestionClientesAmiUnknownException('AMI Originate response unavailable');
+            throw $e;
+        }
+    }
+
+    private function buildPayload($fields)
+    {
         $payload = '';
         foreach ($fields as $name => $value) {
             if (preg_match('/[\r\n]/', (string)$name) || preg_match('/[\r\n]/', (string)$value))
                 throw new InvalidArgumentException('Invalid AMI field');
             $payload .= $name . ': ' . $value . "\r\n";
         }
-        $payload .= "\r\n";
+        return $payload . "\r\n";
+    }
+
+    private function writePayload($payload, $originate)
+    {
+        if (!$this->socket) throw new RuntimeException('AMI is not connected');
         $written = 0;
         $length = strlen($payload);
         while ($written < $length) {
@@ -126,16 +193,16 @@ class GestionClientesDialer
             }
             $written += $count;
         }
-        try {
-            return $this->readMessage();
-        } catch (Exception $e) {
-            if ($originate) throw new GestionClientesAmiUnknownException('AMI Originate response unavailable');
-            throw $e;
-        }
     }
 
-    private function readMessage()
+    private function readMessage($timeout = null)
     {
+        if ($timeout !== null && is_resource($this->socket)) {
+            $seconds = (int)floor($timeout);
+            $micros = (int)(($timeout - $seconds) * 1000000);
+            if ($seconds < 0) { $seconds = 0; $micros = 1; }
+            stream_set_timeout($this->socket, $seconds, $micros);
+        }
         $result = array();
         while (is_resource($this->socket) && !feof($this->socket)) {
             $line = fgets($this->socket, 4096);
@@ -145,6 +212,7 @@ class GestionClientesDialer
             $colon = strpos($line, ':');
             if ($colon !== false) $result[strtolower(trim(substr($line, 0, $colon)))] = trim(substr($line, $colon + 1));
         }
+        if ((!is_resource($this->socket) || feof($this->socket)) && !$result) throw new RuntimeException('AMI connection closed');
         $meta = is_resource($this->socket) ? stream_get_meta_data($this->socket) : array();
         if (!empty($meta['timed_out'])) throw new RuntimeException('AMI response timeout');
         return $result;

@@ -20,6 +20,7 @@ $gcConfig = array(
     'ami_username' => 'gestion_clientes',
     'ami_secret_file' => '/etc/issabel/gestion_clientes_ami.secret',
     'ami_timeout_seconds' => 5,
+    'ami_originate_timeout_seconds' => 35,
     'sip_technology' => 'SIP',
     'dial_context' => 'gestion-clientes-outbound',
     'outbound_context' => 'from-internal',

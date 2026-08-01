@@ -100,6 +100,25 @@ class FakeSeatTakeoverDb
     public function lastInsertId() { return $this->lastId; }
 }
 
+function fake_ami_originate($frames, $holdOpenSeconds)
+{
+    gc_require_class('GestionClientesDialer', 'module/gestion_clientes/libs/GestionClientesDialer.class.php');
+    require_once GC_PROJECT_ROOT . '/tests/fakes/FakeAmiServer.php';
+    $server = new FakeAmiServer($frames, $holdOpenSeconds);
+    $dialer = new GestionClientesDialer(array(
+        'host'=>'127.0.0.1', 'port'=>$server->port(), 'username'=>'gc-test',
+        'secret'=>'gc-test-secret', 'connect_timeout'=>1, 'read_timeout'=>1
+    ));
+    try {
+        $result = $dialer->originate('506', '0991234567', '123e4567-e89b-42d3-a456-426614174000', 'GC-123e4567e89b42d3a');
+        $server->finish();
+        return $result;
+    } catch (Exception $exception) {
+        $server->finish();
+        throw $exception;
+    }
+}
+
 test_case('phone normalization accepts formatted international numbers', function () {
     gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
     assert_same('+593991234567', GestionClientesValidator::normalizePhone(' +593 (99) 123-4567 '), 'Formatting must be removed without losing the leading plus');
@@ -220,6 +239,72 @@ test_case('call origination has durable duplicate and correlation safeguards', f
     assert_true(strpos($workflow, "substr(str_replace('-', '', strtolower(\$token)), 0, 17)") !== false, 'CDR accountcode must fit the production 20-character column');
     assert_true(strpos($dialer, "'Account' => \$accountCode") !== false, 'AMI Originate must tag the agent leg with the compact accountcode');
     assert_true(strpos($workflow, 'ATTEMPT_NOT_FINISHED') !== false, 'Business outcomes must be gated until the technical attempt ends');
+});
+
+test_case('agent-first AMI accepts only the correlated answered OriginateResponse', function () {
+    if (!function_exists('pcntl_fork')) return;
+    $result = fake_ami_originate(array(
+        "Event: Newchannel\r\nChannel: SIP/unrelated-0001",
+        "Event: OriginateResponse\r\nActionID: gc-wrong-action\r\nResponse: Failure\r\nReason: 5",
+        "Event: VarSet\r\nVariable: unrelated\r\nValue: 1",
+        "Event: OriginateResponse\r\nActionID: {{ACTION_ID}}\r\nResponse: Success\r\nReason: 4"
+    ), 0);
+    assert_same('ANSWERED', $result['agent_state'], 'Interleaved events and a wrong ActionID must be ignored until the correlated answered response');
+});
+
+test_case('agent-first AMI maps authoritative no-answer busy and failure reasons', function () {
+    if (!function_exists('pcntl_fork')) return;
+    $cases = array(
+        array('reason'=>'0', 'expected'=>'NO_ANSWER'),
+        array('reason'=>'5', 'expected'=>'BUSY'),
+        array('reason'=>'8', 'expected'=>'FAILED')
+    );
+    foreach ($cases as $case) {
+        $result = fake_ami_originate(array(
+            "Event: OriginateResponse\r\nActionID: {{ACTION_ID}}\r\nResponse: Failure\r\nReason: " . $case['reason']
+        ), 0);
+        assert_same($case['expected'], $result['agent_state'], 'Unexpected state for AMI OriginateResponse Reason ' . $case['reason']);
+    }
+});
+
+test_case('agent-first AMI timeout or wrong ActionID remains non-authoritative', function () {
+    if (!function_exists('pcntl_fork')) return;
+    try {
+        fake_ami_originate(array(
+            "Event: OriginateResponse\r\nActionID: gc-someone-else\r\nResponse: Success\r\nReason: 4"
+        ), 6);
+        throw new RuntimeException('Wrong ActionID unexpectedly became authoritative');
+    } catch (GestionClientesAmiUnknownException $exception) {
+        assert_true(true, 'Expected unknown AMI result');
+    }
+});
+
+test_case('workflow persists authoritative agent result and keeps unknown result non-retryable', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    assert_true(strpos($workflow, "['agent_state']") !== false || strpos($workflow, "['agent_state'") !== false, 'Workflow must consume the authoritative agent_state returned by the dialer');
+    assert_true((bool) preg_match('/\$amiState\s*=\s*\$agentState\s*===\s*[\'\"]ANSWERED[\'\"]\s*\?\s*[\'\"]ORIGINATED[\'\"]\s*:\s*\$agentState/', $workflow), 'Workflow must preserve authoritative no-answer, busy, and failed agent-leg states');
+    assert_true((bool) preg_match('/technical_state=\?[^\'\"]*ended_at=UTC_TIMESTAMP\(\)/', $workflow), 'Authoritative agent-leg failures must close the attempt');
+    assert_true(strpos($workflow, "technical_state=\'ORIGINATED\'") !== false, 'Answered agent leg must continue as ORIGINATED while the customer leg runs');
+    assert_true(strpos($workflow, "technical_state=\'AMBIGUOUS\', ended_at=NULL") !== false, 'Timeout/non-authoritative response must remain AMBIGUOUS and unresolved');
+    assert_true(strpos($workflow, "technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\')") !== false, 'AMBIGUOUS attempt must remain in the duplicate-call guard');
+});
+
+test_case('agent-only failures do not count as customer calls', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $stats = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesStats.class.php');
+    assert_true((bool)preg_match('/LEFT\(raw_error_code,10\)[^\r\n]{0,40}AMI_AGENT_/', $workflow), 'Agent-only failures must not become the phone last-call record');
+    $statFilters = preg_match_all('/LEFT\((?:at\.)?raw_error_code,10\)[^\r\n]{0,40}AMI_AGENT_/', $stats, $matches);
+    assert_true($statFilters >= 2, 'Customer call and outcome statistics must exclude calls that never left the agent leg');
+});
+
+test_case('agent-only failure UI permits a safe retry without requesting an outcome', function () {
+    $javascript = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/js/gestion_clientes.js');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    assert_true((bool)preg_match('/agent_only_failure[\s\S]{0,700}input\[name=idempotency_key\][\s\S]{0,80}idempotencyKey\(\)/', $javascript), 'An authoritative agent-leg failure must renew the call idempotency key before retry');
+    assert_true(strpos($javascript, "enabledButtons.prop('disabled', false)") !== false, 'Only call buttons that were eligible before submission may be re-enabled');
+    assert_true(strpos($javascript, '!window.FormData') === false, 'Serialized AJAX calls must not depend on the unrelated FormData API');
+    assert_true(strpos($javascript, "[data-gc-outcome-form]').hide()") !== false, 'The outcome form must be hidden when the customer was never called');
+    assert_true(strpos($template, 'La llamada anterior no llegó al cliente') !== false, 'A reload must retain a clear agent-leg failure explanation');
 });
 
 test_case('agent cannot start another call before resolving the previous attempt', function () {

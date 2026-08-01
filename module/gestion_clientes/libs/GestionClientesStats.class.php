@@ -17,7 +17,7 @@ class GestionClientesStats
         );
         $assignments = $this->db->fetchOne('SELECT COUNT(*) AS assigned FROM gc_assignment WHERE campaign_id=? AND assignment_state=\'ACTIVE\'', array($campaignId));
         $calls = $this->db->fetchOne(
-            'SELECT COUNT(*) AS total_calls, SUM(CASE WHEN technical_state=\'FAILED\' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN technical_state=\'ANSWERED\' THEN 1 ELSE 0 END) AS answered, SUM(CASE WHEN technical_state IN (\'NO_ANSWER\',\'BUSY\') THEN 1 ELSE 0 END) AS not_answered, COALESCE(SUM(talk_seconds),0) AS talk_seconds FROM gc_attempt WHERE campaign_id=? AND requested_at>=? AND requested_at<?',
+            'SELECT COUNT(*) AS total_calls, SUM(CASE WHEN technical_state=\'FAILED\' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN technical_state=\'ANSWERED\' THEN 1 ELSE 0 END) AS answered, SUM(CASE WHEN technical_state IN (\'NO_ANSWER\',\'BUSY\') THEN 1 ELSE 0 END) AS not_answered, COALESCE(SUM(talk_seconds),0) AS talk_seconds FROM gc_attempt WHERE campaign_id=? AND requested_at>=? AND requested_at<? AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\')',
             array($campaignId, $fromUtc, $toUtc)
         );
         $callbacks = $this->db->fetchOne(
@@ -38,7 +38,7 @@ class GestionClientesStats
     public function outcomeBreakdown($campaignId, $fromUtc, $toUtc)
     {
         return $this->db->fetchAll(
-            'SELECT COALESCE(o.label, \'Sin resultado\') AS label, COUNT(*) AS total FROM gc_attempt at LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id WHERE at.campaign_id=? AND at.requested_at>=? AND at.requested_at<? GROUP BY o.id, o.label ORDER BY total DESC',
+            'SELECT COALESCE(o.label, \'Sin resultado\') AS label, COUNT(*) AS total FROM gc_attempt at LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id WHERE at.campaign_id=? AND at.requested_at>=? AND at.requested_at<? AND (at.raw_error_code IS NULL OR LEFT(at.raw_error_code,10)<>\'AMI_AGENT_\') GROUP BY o.id, o.label ORDER BY total DESC',
             array($campaignId, $fromUtc, $toUtc)
         );
     }

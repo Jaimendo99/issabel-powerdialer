@@ -45,7 +45,7 @@ class GestionClientesSeatSession
         $hash = $this->sessionHash();
         $ttl = $this->ttl;
         return $this->db->transaction(function ($tx) use ($agentMapId, $extension, $hash, $ttl) {
-            $tx->execute('UPDATE gc_work_session ws SET ws.active_extension=NULL, ws.released_at=UTC_TIMESTAMP() WHERE ws.active_extension IS NOT NULL AND ws.expires_at<=UTC_TIMESTAMP() AND NOT EXISTS (SELECT 1 FROM gc_attempt at WHERE at.work_session_id=ws.id AND at.ended_at IS NULL AND at.technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\'))', array());
+            $tx->execute('UPDATE gc_work_session ws SET ws.active_extension=NULL, ws.released_at=UTC_TIMESTAMP() WHERE ws.active_extension IS NOT NULL AND ws.expires_at<=UTC_TIMESTAMP() AND NOT EXISTS (SELECT 1 FROM gc_attempt at WHERE at.work_session_id=ws.id AND at.ended_at IS NULL AND at.technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\'))', array());
             $seat = $tx->fetchOne('SELECT sip_extension, label FROM gc_sip_seat WHERE sip_extension=? AND active=1 FOR UPDATE', array($extension));
             if (!$seat) {
                 throw new RuntimeException('SEAT_NOT_ALLOWED');
@@ -62,9 +62,17 @@ class GestionClientesSeatSession
             if ($existing && $this->hasActiveAttempt($tx, $existing['id'])) {
                 throw new RuntimeException('SEAT_HAS_ACTIVE_CALL');
             }
-            $occupied = $tx->fetchOne('SELECT id FROM gc_work_session WHERE active_extension=? AND released_at IS NULL FOR UPDATE', array($extension));
+            $occupied = $tx->fetchOne('SELECT id, agent_map_id FROM gc_work_session WHERE active_extension=? AND released_at IS NULL FOR UPDATE', array($extension));
             if ($occupied) {
-                throw new RuntimeException('SEAT_IN_USE');
+                if ((int)$occupied['agent_map_id'] !== (int)$agentMapId) {
+                    throw new RuntimeException('SEAT_IN_USE');
+                }
+                if ($this->hasActiveAttempt($tx, $occupied['id'])) {
+                    throw new RuntimeException('SEAT_HAS_ACTIVE_CALL');
+                }
+                // A new Issabel/PHP session of the same person may safely take
+                // over their previous seat reservation when no call is active.
+                $tx->execute('UPDATE gc_work_session SET active_extension=NULL, released_at=UTC_TIMESTAMP() WHERE id=?', array($occupied['id']));
             }
             if ($existing) {
                 $tx->execute('UPDATE gc_work_session SET active_extension=NULL, released_at=UTC_TIMESTAMP() WHERE id=?', array($existing['id']));
@@ -90,7 +98,7 @@ class GestionClientesSeatSession
 
     private function hasActiveAttempt($db, $workSessionId)
     {
-        return (bool)$db->fetchOne('SELECT id FROM gc_attempt WHERE work_session_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\') LIMIT 1', array((int)$workSessionId));
+        return (bool)$db->fetchOne('SELECT id FROM gc_attempt WHERE work_session_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\') LIMIT 1', array((int)$workSessionId));
     }
 
     private function sessionHash()

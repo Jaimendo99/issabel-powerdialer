@@ -3,6 +3,10 @@
 
 require dirname(__FILE__) . '/bootstrap.php';
 
+if (session_id() === '') {
+    session_id('gc-seat-regression');
+}
+
 $tests = array();
 $failures = 0;
 
@@ -33,6 +37,67 @@ function assert_invalid_result($actual, $message)
         $invalid = isset($actual['valid']) ? !$actual['valid'] : count($actual) > 0;
     }
     assert_true($invalid, $message . '; received ' . var_export($actual, true));
+}
+
+class FakeSeatTakeoverDb
+{
+    public $sessions = array();
+    public $activeAttempts = array();
+    private $lastId = 100;
+
+    public function transaction($callback)
+    {
+        return call_user_func($callback, $this);
+    }
+
+    public function fetchOne($sql, $params)
+    {
+        if (strpos($sql, 'FROM gc_sip_seat') !== false) {
+            return $params[0] === '501' ? array('sip_extension'=>'501', 'label'=>'Puesto 501') : null;
+        }
+        if (strpos($sql, 'FROM gc_agent_map') !== false) {
+            return array('id'=>(int)$params[0]);
+        }
+        if (strpos($sql, 'FROM gc_attempt') !== false) {
+            $workSessionId = (int)$params[0];
+            return !empty($this->activeAttempts[$workSessionId]) ? array('id'=>900) : null;
+        }
+        if (strpos($sql, 'FROM gc_work_session') !== false && strpos($sql, 'session_hash=?') !== false) {
+            foreach ($this->sessions as $row) {
+                if ((int)$row['agent_map_id'] === (int)$params[0] && $row['session_hash'] === $params[1] && empty($row['released_at'])) return $row;
+            }
+            return null;
+        }
+        if (strpos($sql, 'FROM gc_work_session') !== false && strpos($sql, 'active_extension=?') !== false) {
+            foreach ($this->sessions as $row) {
+                if ($row['active_extension'] === $params[0] && empty($row['released_at'])) return $row;
+            }
+            return null;
+        }
+        throw new RuntimeException('Unexpected fake query: ' . $sql);
+    }
+
+    public function execute($sql, $params)
+    {
+        if (strpos($sql, 'INSERT INTO gc_work_session') !== false) {
+            $this->lastId++;
+            $this->sessions[$this->lastId] = array('id'=>$this->lastId, 'agent_map_id'=>(int)$params[0], 'session_hash'=>$params[1], 'sip_extension'=>$params[2], 'active_extension'=>$params[3], 'released_at'=>null);
+            return true;
+        }
+        if (strpos($sql, 'UPDATE gc_work_session') !== false && strpos($sql, 'WHERE id=?') !== false && strpos($sql, 'active_extension=NULL') !== false) {
+            $id = (int)$params[count($params) - 1];
+            if (isset($this->sessions[$id])) {
+                $this->sessions[$id]['active_extension'] = null;
+                $this->sessions[$id]['released_at'] = 'now';
+            }
+            return true;
+        }
+        if (strpos($sql, 'UPDATE gc_work_session') !== false) return true;
+        throw new RuntimeException('Unexpected fake execute: ' . $sql);
+    }
+
+    public function pdo() { return $this; }
+    public function lastInsertId() { return $this->lastId; }
 }
 
 test_case('phone normalization accepts formatted international numbers', function () {
@@ -231,6 +296,38 @@ test_case('seat selection is session-scoped and validated server-side', function
     assert_true((bool) preg_match('/action[^\n]{0,100}(select|set|clear|change)[^\n]{0,60}(seat|extension)|(seat|extension)[^\n]{0,60}(select|set|clear|change)/i', $index), 'A dedicated seat selection endpoint/action is required');
     assert_true(strpos($index, 'validateMutation') !== false, 'Seat changes must use the standard POST/CSRF/idempotency mutation guard');
     assert_true((bool) preg_match('/preg_match\s*\([^\n]*(seat|extension)|function\s+[^\s(]*(seat|extension)[^\{]*\{[\s\S]{0,800}preg_match/i', $combined), 'Server-side seat validation must restrict extension syntax');
+});
+
+test_case('same agent may recover an inactive occupied seat but other agents and active calls may not', function () {
+    gc_require_class('GestionClientesSeatSession', 'module/gestion_clientes/libs/GestionClientesSeatSession.class.php');
+    $currentHash = hash('sha256', 'gestion_clientes|' . session_id());
+
+    $recoverable = new FakeSeatTakeoverDb();
+    $recoverable->sessions[10] = array('id'=>10, 'agent_map_id'=>7, 'session_hash'=>str_repeat('a', 64), 'sip_extension'=>'501', 'active_extension'=>'501', 'released_at'=>null);
+    $service = new GestionClientesSeatSession($recoverable, 1800);
+    $selected = $service->select(7, '501');
+    assert_same('501', $selected['sip_extension'], 'Same agent must recover its stale seat in a new browser session');
+    assert_true($recoverable->sessions[10]['active_extension'] === null, 'Recovered prior work session must release its active-extension lock');
+    assert_true($recoverable->sessions[$selected['id']]['session_hash'] === $currentHash, 'Recovered seat must bind to the current PHP session');
+
+    $otherAgent = new FakeSeatTakeoverDb();
+    $otherAgent->sessions[20] = array('id'=>20, 'agent_map_id'=>8, 'session_hash'=>str_repeat('b', 64), 'sip_extension'=>'501', 'active_extension'=>'501', 'released_at'=>null);
+    try {
+        (new GestionClientesSeatSession($otherAgent, 1800))->select(7, '501');
+        throw new RuntimeException('Different agent unexpectedly recovered an occupied seat');
+    } catch (RuntimeException $exception) {
+        assert_same('SEAT_IN_USE', $exception->getMessage(), 'A seat held by another agent must remain unavailable');
+    }
+
+    $activeCall = new FakeSeatTakeoverDb();
+    $activeCall->sessions[30] = array('id'=>30, 'agent_map_id'=>7, 'session_hash'=>str_repeat('c', 64), 'sip_extension'=>'501', 'active_extension'=>'501', 'released_at'=>null);
+    $activeCall->activeAttempts[30] = true;
+    try {
+        (new GestionClientesSeatSession($activeCall, 1800))->select(7, '501');
+        throw new RuntimeException('Seat with an active call was unexpectedly recovered');
+    } catch (RuntimeException $exception) {
+        assert_same('SEAT_HAS_ACTIVE_CALL', $exception->getMessage(), 'Same-agent takeover must be blocked specifically while its previous session has an active call');
+    }
 });
 
 test_case('call form cannot override the server-side selected seat', function () {

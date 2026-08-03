@@ -477,6 +477,18 @@ test_case('call form cannot override the server-side selected seat', function ()
     assert_true(!preg_match('/name=[\'\"][^\'\"]*(seat|extension)[^\'\"]*[\'\"]/i', $parts[1]), 'Call requests must not post a seat/extension that can override the server-side session selection');
 });
 
+test_case('workspace uses a compact header seat control', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    $css = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/css/gestion_clientes.css');
+    assert_true(strpos($template, 'gc-seat-panel') === false, 'The large session-extension panel must be hidden from the workspace');
+    assert_true(substr_count($template, 'gc-extension-chip') === 1, 'Llamar desde must appear only once in the compact header');
+    $headingEnd = strpos($template, '</div></div>');
+    $heading = $headingEnd === false ? '' : substr($template, 0, $headingEnd);
+    assert_true(strpos($heading, 'Mis clientes llamados') !== false && strpos($heading, 'gc-seat-compact') !== false, 'History and compact seat controls must share the workspace header');
+    assert_true(strpos($template, 'name="sip_extension"') !== false && strpos($template, 'seat_release_url') !== false, 'Compact control must retain change and release operations');
+    assert_true(strpos($css, '.gc-seat-popover') !== false, 'Compact seat selector requires a hidden popover');
+});
+
 test_case('workspace phone view exposes per-number state and attempt history', function () {
     $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
     assert_true((bool) preg_match('/function\s+gc_client_view[\s\S]*?[\'\"]state[\'\"]\s*=>\s*\$p\s*\[[\'\"]state[\'\"]/', $index), 'Each rendered phone must retain its current state');

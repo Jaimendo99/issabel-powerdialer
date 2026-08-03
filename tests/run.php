@@ -363,6 +363,27 @@ test_case('CDR reconciliation has a safe production cron definition', function (
     assert_true(strpos($cron, '/usr/local/sbin/gestion-clientes-reconcile-cdr') !== false, 'Cron must use the stable production command');
 });
 
+test_case('dialplan finalizes the workflow immediately after Dial returns', function () {
+    $dialplan = file_get_contents(GC_PROJECT_ROOT . '/asterisk/extensions_gestion_clientes.conf');
+    $dial = strpos($dialplan, 'Dial(Local/${EXTEN}@gestion-clientes-route/n,60)');
+    $finalize = strpos($dialplan, 'AGI(gestion-clientes-finalize-call,${GC_ATTEMPT_ID},${GC_DIAL_STATUS})');
+    assert_true($dial !== false && $finalize !== false && $finalize > $dial, 'Real-time finalization must run after the customer Dial finishes');
+});
+
+test_case('real-time finalizer maps Asterisk Dial statuses safely', function () {
+    gc_require_class('GestionClientesCallFinalizer', 'module/gestion_clientes/libs/GestionClientesCallFinalizer.class.php');
+    $finalizer = new GestionClientesCallFinalizer(null);
+    assert_same('ANSWERED', $finalizer->technicalState('ANSWER'), 'Answered calls must settle immediately');
+    assert_same('NO_ANSWER', $finalizer->technicalState('NOANSWER'), 'Unanswered calls must settle immediately');
+    assert_same('BUSY', $finalizer->technicalState('BUSY'), 'Busy calls must settle immediately');
+    assert_same('CANCELED', $finalizer->technicalState('CANCEL'), 'Canceled calls must settle immediately');
+    assert_same('FAILED', $finalizer->technicalState('CHANUNAVAIL'), 'Unavailable routes must settle as failed');
+    try {
+        $finalizer->technicalState('ANSWER;touch /tmp/bad');
+        throw new RuntimeException('Unsafe Dial status was accepted');
+    } catch (InvalidArgumentException $expected) {}
+});
+
 test_case('dynamic seat keeps permanent agent identity for ownership and statistics', function () {
     $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');

@@ -243,12 +243,14 @@ Install the approved reconciliation schedule with:
 
 ```sh
 install -o root -g root -m 0755 bin/reconcile_cdr.php /usr/local/sbin/gestion-clientes-reconcile-cdr
+install -o root -g root -m 0755 bin/finalize_call.php /var/lib/asterisk/agi-bin/gestion-clientes-finalize-call
 install -o root -g root -m 0644 install/gestion-clientes.cron /etc/cron.d/gestion-clientes
 ```
 
-The cron runs once per minute under a non-overlapping `flock`. Its two-minute
-minimum age allows Asterisk to finish writing all linked CDR legs, so a finished
-call will normally settle in the UI within one to three minutes.
+The dedicated dialplan invokes the finalizer as soon as `Dial()` returns, so the
+three-second browser poll can unlock disposition immediately after hangup. The
+cron remains a non-overlapping fallback and enriches the attempt with authoritative
+CDR duration, recording and linked-leg data after Asterisk finishes writing it.
 
 ## 5. Data model
 

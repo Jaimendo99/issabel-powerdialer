@@ -239,6 +239,17 @@ Production paths after approval:
 - CDR reconciliation command: `/usr/local/sbin/gestion-clientes-reconcile-cdr`
 - Scheduled reconciliation: `/etc/cron.d/gestion-clientes` initially; replace with a service only if live events are justified
 
+Install the approved reconciliation schedule with:
+
+```sh
+install -o root -g root -m 0755 bin/reconcile_cdr.php /usr/local/sbin/gestion-clientes-reconcile-cdr
+install -o root -g root -m 0644 install/gestion-clientes.cron /etc/cron.d/gestion-clientes
+```
+
+The cron runs once per minute under a non-overlapping `flock`. Its two-minute
+minimum age allows Asterisk to finish writing all linked CDR legs, so a finished
+call will normally settle in the UI within one to three minutes.
+
 ## 5. Data model
 
 Use table prefix `gc_` in a dedicated database named `gestion_clientes` unless the Phase 0 inspection shows a safer established convention. Use InnoDB, explicit foreign keys, UTC timestamps, and utf8.

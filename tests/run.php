@@ -355,6 +355,14 @@ test_case('CDR reconciliation backs off unmatched attempts without starving newe
     assert_true(strpos($migration, 'VALUES (3, UTC_TIMESTAMP())') !== false, 'Migration 003 must be recorded in the schema ledger');
 });
 
+test_case('CDR reconciliation has a safe production cron definition', function () {
+    $cron = file_get_contents(GC_PROJECT_ROOT . '/install/gestion-clientes.cron');
+    assert_true(strpos($cron, '* * * * * root') !== false, 'CDR reconciliation must run every minute');
+    assert_true(strpos($cron, '/usr/bin/flock -n') !== false, 'Concurrent reconciliation runs must be prevented');
+    assert_true(strpos($cron, '--min-age 120') !== false, 'Cron must allow linked CDR legs to settle');
+    assert_true(strpos($cron, '/usr/local/sbin/gestion-clientes-reconcile-cdr') !== false, 'Cron must use the stable production command');
+});
+
 test_case('dynamic seat keeps permanent agent identity for ownership and statistics', function () {
     $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');

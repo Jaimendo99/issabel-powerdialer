@@ -524,6 +524,16 @@ test_case('workspace selects one phone with side-by-side disposition', function 
     assert_true(strpos($css, '.gc-contact-workarea') !== false && strpos($css, '.gc-phone-tabs{display:flex') !== false, 'Desktop phone detail and horizontal selector layout must be styled');
 });
 
+test_case('workspace uses the polished client and phone card hierarchy', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    $css = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/css/gestion_clientes.css');
+    assert_true(strpos($template, 'gc-client-avatar') !== false && strpos($template, 'gc-client-state') !== false, 'Current client header must expose the avatar and state landmarks');
+    assert_true(strpos($template, 'gc-phone-summary') !== false && strpos($template, 'gc-history-line') !== false, 'Selected phone must group status and call history clearly');
+    assert_true(strpos($template, 'gc-outcome-fields') !== false && strpos($template, 'gc-note-field') !== false, 'Outcome and note controls must share the result panel');
+    assert_true(strpos($template, 'gc-phone-tab-check') !== false, 'Selected phone tab must expose a visible selection marker');
+    assert_true(strpos($css, '.gc-phone-detail .gc-phone-call-form .gc-call{border-radius:50%') !== false, 'Selected phone call action must use the compact circular treatment');
+});
+
 test_case('workspace does not display internal agent identity', function () {
     $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
     assert_true(strpos($template, '{$agent.name') === false && strpos($template, '{$agent.number') === false, 'Internal Issabel agent identity must not appear in the workspace header');

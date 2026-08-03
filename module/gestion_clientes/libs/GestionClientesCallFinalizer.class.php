@@ -44,7 +44,7 @@ class GestionClientesCallFinalizer
         if ($status === 'ANSWER') return 'ANSWERED';
         if ($status === 'BUSY') return 'BUSY';
         if ($status === 'NOANSWER') return 'NO_ANSWER';
-        if ($status === 'CANCEL') return 'CANCELED';
+        if ($status === '' || $status === 'CANCEL') return 'CANCELED';
         if (in_array($status, array('CHANUNAVAIL','CONGESTION','DONTCALL','TORTURE','INVALIDARGS'), true)) return 'FAILED';
         throw new InvalidArgumentException('Invalid Dial status');
     }

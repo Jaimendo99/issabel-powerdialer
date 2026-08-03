@@ -365,9 +365,9 @@ test_case('CDR reconciliation has a safe production cron definition', function (
 
 test_case('dialplan finalizes the workflow immediately after Dial returns', function () {
     $dialplan = file_get_contents(GC_PROJECT_ROOT . '/asterisk/extensions_gestion_clientes.conf');
-    $dial = strpos($dialplan, 'Dial(Local/${EXTEN}@gestion-clientes-route/n,60)');
-    $finalize = strpos($dialplan, 'AGI(gestion-clientes-finalize-call,${GC_ATTEMPT_ID},${GC_DIAL_STATUS})');
-    assert_true($dial !== false && $finalize !== false && $finalize > $dial, 'Real-time finalization must run after the customer Dial finishes');
+    assert_true(strpos($dialplan, 'exten => h,1') !== false, 'Real-time finalization must use the hangup extension when Dial cannot advance');
+    assert_true(strpos($dialplan, 'AGI(gestion-clientes-finalize-call,${GC_ATTEMPT_ID},${GC_DIAL_STATUS})') !== false, 'The hangup extension must invoke the real-time finalizer');
+    assert_true(strpos($dialplan, 'GC_DIAL_STATUS=CANCEL') !== false, 'Caller teardown before DIALSTATUS must have a safe terminal fallback');
 });
 
 test_case('real-time finalizer maps Asterisk Dial statuses safely', function () {
@@ -377,6 +377,7 @@ test_case('real-time finalizer maps Asterisk Dial statuses safely', function () 
     assert_same('NO_ANSWER', $finalizer->technicalState('NOANSWER'), 'Unanswered calls must settle immediately');
     assert_same('BUSY', $finalizer->technicalState('BUSY'), 'Busy calls must settle immediately');
     assert_same('CANCELED', $finalizer->technicalState('CANCEL'), 'Canceled calls must settle immediately');
+    assert_same('CANCELED', $finalizer->technicalState(''), 'A caller hangup before Dial returns must still settle immediately');
     assert_same('FAILED', $finalizer->technicalState('CHANUNAVAIL'), 'Unavailable routes must settle as failed');
     try {
         $finalizer->technicalState('ANSWER;touch /tmp/bad');

@@ -326,10 +326,35 @@ test_case('uncertain AMI responses remain unresolved instead of triggering a dup
     assert_true($catchEnd !== false && $originatedUpdate !== false && $originatedUpdate > $catchEnd, 'A database failure after accepted Originate must not be misclassified as an AMI rejection');
 });
 
-test_case('queue does not immediately reclaim follow-up outcome states', function () {
+test_case('queue only auto-claims untouched clients or due callbacks', function () {
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
-    assert_true(strpos($workflow, "c.state IN (\\'PENDING\\',\\'NO_CONTACT\\',\\'CALLBACK\\')") !== false, 'Claim queue must only include immediately actionable client states');
+    assert_true(strpos($workflow, "c.state=\\'PENDING\\' AND NOT EXISTS") !== false, 'Called informational outcomes must not immediately re-enter the automatic queue');
+    assert_true(strpos($workflow, "c.state=\\'CALLBACK\\'") !== false && strpos($workflow, "due_cb.due_at_utc<=UTC_TIMESTAMP()") !== false, 'Only due callbacks should automatically return after a call');
     assert_true(strpos($workflow, "agent_note IS NULL OR agent_note=\\'\\'") !== false, 'An idempotent outcome retry must be able to restore a note omitted by the first browser request');
+});
+
+test_case('non-callback outcomes are informational client metadata only', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $seed = file_get_contents(GC_PROJECT_ROOT . '/install/seed_outcomes.sql');
+    $migration = file_get_contents(GC_PROJECT_ROOT . '/install/migrations/005_informational_outcomes.sql');
+    assert_true(strpos($workflow, "UPDATE gc_client SET state=?, terminal=0") !== false, 'Saving a label must never terminally close the client');
+    assert_true(strpos($workflow, "UPDATE gc_client_phone SET state=\\'INVALID\\'") === false, 'An informational label must not invalidate a phone');
+    assert_true(strpos($workflow, "assignment_state=\\'COMPLETED\\'") === false, 'An informational label must not complete ownership assignment');
+    assert_true(strpos($workflow, "if ((int)\$outcome['requires_callback'] === 1)") !== false, 'Callback scheduling must remain the explicit operational exception');
+    assert_true(strpos($seed, "'NOT_INTERESTED','No interesado',40,'PENDING',0") !== false, 'Fresh outcome catalog must keep No interesado informational');
+    assert_true(strpos($migration, 'terminal=0') !== false && strpos($migration, 'VALUES (5, UTC_TIMESTAMP())') !== false, 'Existing outcome catalogs must migrate to informational semantics');
+});
+
+test_case('agents have an owned called-client history with guarded reopen', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/called_clients.tpl');
+    assert_true(strpos($workflow, 'function calledClients') !== false && strpos($workflow, 'WHERE agent_map_id=?') !== false, 'History visibility must use permanent attempt ownership');
+    assert_true(strpos($workflow, 'function reopenClient') !== false && strpos($workflow, 'CLIENT_ASSIGNED_TO_OTHER_AGENT') !== false, 'Reopen must not steal a reassigned client');
+    assert_true(strpos($workflow, 'CLIENT_HISTORY_REQUIRED') !== false && strpos($workflow, 'OUTCOME_REQUIRED_BEFORE_CALL') !== false, 'Reopen must require call history and no unresolved disposition');
+    assert_true(strpos($index, "\$action === 'called_clients'") !== false && strpos($index, "\$action === 'reopen_client'") !== false, 'Agent history routes must be available before supervisor-only routing');
+    assert_true((bool)preg_match('/<form[^>]*method="post"[^>]*action="\{\$reopen_url/', $template), 'Reopen must be a guarded POST form');
+    assert_true(strpos($template, 'name="csrf_token"') !== false && strpos($template, 'name="idempotency_key"') !== false, 'Reopen must carry CSRF and idempotency controls');
 });
 
 test_case('Asterisk 11 dialplan derives its compact CDR key from the attempt UUID', function () {

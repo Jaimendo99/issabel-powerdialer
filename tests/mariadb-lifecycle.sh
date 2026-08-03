@@ -101,8 +101,10 @@ assert_query "default outcome seed remains idempotent" \
   "SELECT COUNT(*) FROM gc_outcome WHERE campaign_id IS NULL" "8"
 assert_query "callback seed retains callback requirement" \
   "SELECT CONCAT(resulting_client_state,':',requires_callback) FROM gc_outcome WHERE campaign_id IS NULL AND code='CALLBACK'" "CALLBACK:1"
+assert_query "non-callback outcomes remain informational" \
+  "SELECT COUNT(*) FROM gc_outcome WHERE requires_callback=0 AND (resulting_client_state<>'PENDING' OR terminal<>0 OR mark_phone_invalid<>0)" "0"
 
 assert_query "schema ledger records every migration" \
-  "SELECT GROUP_CONCAT(version_num ORDER BY version_num SEPARATOR ',') FROM gc_schema_version" "1,2,3,4"
+  "SELECT GROUP_CONCAT(version_num ORDER BY version_num SEPARATOR ',') FROM gc_schema_version" "1,2,3,4,5"
 
 echo "MariaDB fresh-install and repeat-migration lifecycle passed with $IMAGE."

@@ -20,3 +20,17 @@
 
 Si el sistema informa mapeo inexistente/ambiguo, intento activo o estado sin
 reconciliar, no repita llamadas: contacte al supervisor con el `request_id`.
+## Resultados e historial del agente
+
+Los resultados como **Interesado**, **No interesado**, **Venta** o **Sin
+contacto** son etiquetas informativas guardadas sobre cada intento. No cierran
+el cliente, no invalidan números y no lo devuelven automáticamente a la cola.
+
+**Volver a llamar** es la única excepción operativa: exige fecha, hora y zona
+horaria, y devuelve el cliente a la cola del mismo agente cuando vence.
+
+Cada agente puede abrir **Mis clientes llamados** desde Mi cartera. La lista
+muestra su último intento, resultado, nota, número y callback pendiente. El
+botón **Abrir** crea una nueva toma explícita para ese mismo agente. No permite
+tomar un cliente que haya sido reasignado a otra persona ni abandonar una
+llamada o resultado todavía pendiente.

@@ -36,7 +36,7 @@ class GestionClientesWorkflow
                 return $self->hydrateClient($existing);
             }
             $client = $tx->fetchOne(
-                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND c.state IN (\'PENDING\',\'NO_CONTACT\',\'CALLBACK\') AND cl.client_id IS NULL AND (c.state<>\'CALLBACK\' OR EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP())) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()) THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
+                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL AND ((c.state=\'PENDING\' AND NOT EXISTS (SELECT 1 FROM gc_attempt called WHERE called.client_id=c.id AND (called.raw_error_code IS NULL OR LEFT(called.raw_error_code,10)<>\'AMI_AGENT_\')) ) OR (c.state=\'CALLBACK\' AND EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()))) ORDER BY CASE WHEN c.state=\'CALLBACK\' THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
                 array($agentMapId)
             );
             if (!$client) {
@@ -218,38 +218,90 @@ class GestionClientesWorkflow
             if (count($errors)) {
                 throw new InvalidArgumentException($errors[0]);
             }
-            $newState = $outcome['resulting_client_state'];
-            if ((int)$outcome['mark_phone_invalid'] === 1) {
-                $tx->execute('UPDATE gc_client_phone SET state=\'INVALID\' WHERE id=?', array($attempt['phone_id']));
-                $usable = $tx->fetchOne('SELECT COUNT(*) AS total FROM gc_client_phone WHERE client_id=? AND state NOT IN (\'INVALID\',\'DO_NOT_CALL\')', array($attempt['client_id']));
-                if ((int)$usable['total'] === 0) {
-                    $newState = 'INVALID';
-                    $outcome['terminal'] = 1;
-                }
-            }
             $tx->execute('UPDATE gc_attempt SET business_outcome_id=?, agent_note=? WHERE id=?', array($outcomeId, trim($note), $attemptId));
             $tx->execute('UPDATE gc_callback SET status=\'COMPLETED\', completed_at=UTC_TIMESTAMP() WHERE assignment_id=? AND status=\'OPEN\'', array($attempt['assignment_id']));
             $nextAction = null;
+            $newState = 'PENDING';
             if ((int)$outcome['requires_callback'] === 1) {
                 $nextAction = GestionClientesValidator::localToUtc($callback['due_at'], $callback['timezone']);
+                $newState = 'CALLBACK';
                 $tx->execute(
                     'INSERT INTO gc_callback (client_id, assignment_id, attempt_id, due_at_utc, timezone, status, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, \'OPEN\', ?, ?, UTC_TIMESTAMP())',
                     array($attempt['client_id'], $attempt['assignment_id'], $attemptId, $nextAction, $callback['timezone'], trim($callback['note']), $actor)
                 );
             }
-            $managed = (int)$outcome['terminal'] === 1 ? 'UTC_TIMESTAMP()' : 'NULL';
             $tx->execute(
-                'UPDATE gc_client SET state=?, terminal=?, next_action_at=?, managed_at=' . $managed . ', updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?',
-                array($newState, (int)$outcome['terminal'], $nextAction, $attempt['client_id'])
+                'UPDATE gc_client SET state=?, terminal=0, next_action_at=?, managed_at=NULL, updated_at=UTC_TIMESTAMP(), row_version=row_version+1 WHERE id=?',
+                array($newState, $nextAction, $attempt['client_id'])
             );
-            if ((int)$outcome['terminal'] === 1) {
-                $tx->execute('UPDATE gc_assignment SET assignment_state=\'COMPLETED\', active_client_key=NULL, released_at=UTC_TIMESTAMP(), release_reason=\'TERMINAL_OUTCOME\' WHERE id=?', array($attempt['assignment_id']));
-            }
-            if ((int)$outcome['advance_to_next'] === 1 || (int)$outcome['terminal'] === 1) {
-                $tx->execute('DELETE FROM gc_client_claim WHERE client_id=? AND agent_map_id=?', array($attempt['client_id'], $agentMapId));
-            }
+            $tx->execute('DELETE FROM gc_client_claim WHERE client_id=? AND agent_map_id=?', array($attempt['client_id'], $agentMapId));
             $tx->audit($attempt['client_id'], $actor, 'OUTCOME_SAVED', $attempt['client_state'], $newState, array('attempt_id' => $attemptId, 'outcome_id' => $outcomeId, 'callback_at_utc' => $nextAction), $ip);
-            return array('attempt_id' => (int)$attemptId, 'client_state' => $newState, 'terminal' => (bool)$outcome['terminal'], 'advance' => (bool)$outcome['advance_to_next']);
+            return array('attempt_id' => (int)$attemptId, 'client_state' => $newState, 'terminal' => false, 'advance' => true);
+        });
+    }
+
+    public function calledClients($agentMapId, $limit)
+    {
+        $limit = max(1, min(500, (int)$limit));
+        $rows = $this->db->fetchAll(
+            'SELECT c.id AS client_id,c.external_key,c.display_name,c.state,c.terminal,camp.name AS campaign_name,camp.timezone,'
+            . ' at.id AS attempt_id,at.requested_at,at.technical_state,at.agent_note,o.label AS outcome_label,p.original_value AS phone_number,'
+            . ' totals.attempt_count,hist.assignment_state AS history_assignment_state,hist.release_reason,'
+            . ' active.id AS active_assignment_id,active.agent_map_id AS active_agent_map_id,cl.agent_map_id AS claim_agent_map_id,'
+            . ' cb.due_at_utc AS callback_due_at,cb.timezone AS callback_timezone'
+            . ' FROM (SELECT client_id,MAX(id) AS latest_attempt_id,COUNT(*) AS attempt_count FROM gc_attempt'
+            . ' WHERE agent_map_id=? AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\') GROUP BY client_id) totals'
+            . ' JOIN gc_attempt at ON at.id=totals.latest_attempt_id JOIN gc_client c ON c.id=at.client_id'
+            . ' JOIN gc_campaign camp ON camp.id=c.campaign_id JOIN gc_client_phone p ON p.id=at.phone_id'
+            . ' JOIN gc_assignment hist ON hist.id=at.assignment_id'
+            . ' LEFT JOIN gc_assignment active ON active.client_id=c.id AND active.assignment_state=\'ACTIVE\''
+            . ' LEFT JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.expires_at>UTC_TIMESTAMP()'
+            . ' LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id'
+            . ' LEFT JOIN gc_callback cb ON cb.id=(SELECT MAX(cb2.id) FROM gc_callback cb2 WHERE cb2.client_id=c.id AND cb2.status=\'OPEN\')'
+            . ' ORDER BY at.requested_at DESC,at.id DESC LIMIT ' . $limit,
+            array($agentMapId)
+        );
+        foreach ($rows as &$row) {
+            $ownedActive = $row['active_assignment_id'] !== null && (int)$row['active_agent_map_id'] === (int)$agentMapId;
+            $ownLegacyCompleted = $row['active_assignment_id'] === null && $row['history_assignment_state'] === 'COMPLETED' && $row['release_reason'] === 'TERMINAL_OUTCOME';
+            $row['can_reopen'] = ($ownedActive || $ownLegacyCompleted) && $row['claim_agent_map_id'] === null;
+        }
+        return $rows;
+    }
+
+    public function reopenClient($agentMapId, $clientId, $actor, $ip)
+    {
+        $ttl = $this->claimTtl;
+        return $this->db->transaction(function ($tx) use ($agentMapId, $clientId, $actor, $ip, $ttl) {
+            $tx->execute('DELETE FROM gc_client_claim WHERE expires_at<=UTC_TIMESTAMP()', array());
+            $history = $tx->fetchOne('SELECT id FROM gc_attempt WHERE client_id=? AND agent_map_id=? AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\') LIMIT 1', array($clientId, $agentMapId));
+            if (!$history) throw new RuntimeException('CLIENT_HISTORY_REQUIRED');
+            $activeAttempt = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\') LIMIT 1', array($agentMapId));
+            if ($activeAttempt) throw new RuntimeException('ACTIVE_ATTEMPT_EXISTS');
+            $latestFinished = $tx->fetchOne('SELECT id,business_outcome_id,raw_error_code FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1', array($agentMapId));
+            $agentOnlyFailure = $latestFinished && strpos((string)$latestFinished['raw_error_code'], 'AMI_AGENT_') === 0;
+            if ($latestFinished && $latestFinished['business_outcome_id'] === null && !$agentOnlyFailure) throw new RuntimeException('OUTCOME_REQUIRED_BEFORE_CALL');
+            $current = $tx->fetchOne('SELECT client_id FROM gc_client_claim WHERE agent_map_id=? AND expires_at>UTC_TIMESTAMP() LIMIT 1 FOR UPDATE', array($agentMapId));
+            if ($current && (int)$current['client_id'] !== (int)$clientId) throw new RuntimeException('CURRENT_CLIENT_EXISTS');
+
+            $client = $tx->fetchOne('SELECT id,state,terminal FROM gc_client WHERE id=? FOR UPDATE', array($clientId));
+            if (!$client) throw new RuntimeException('CLIENT_NOT_FOUND');
+            $assignment = $tx->fetchOne('SELECT * FROM gc_assignment WHERE client_id=? AND assignment_state=\'ACTIVE\' LIMIT 1 FOR UPDATE', array($clientId));
+            if ($assignment && (int)$assignment['agent_map_id'] !== (int)$agentMapId) throw new RuntimeException('CLIENT_ASSIGNED_TO_OTHER_AGENT');
+            if (!$assignment) {
+                $assignment = $tx->fetchOne('SELECT * FROM gc_assignment WHERE client_id=? AND agent_map_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE', array($clientId, $agentMapId));
+                if (!$assignment || $assignment['assignment_state'] !== 'COMPLETED' || $assignment['release_reason'] !== 'TERMINAL_OUTCOME') throw new RuntimeException('CLIENT_NOT_OWNED');
+                $tx->execute('UPDATE gc_assignment SET assignment_state=\'ACTIVE\',active_client_key=client_id,released_at=NULL,release_reason=NULL WHERE id=?', array($assignment['id']));
+            }
+            $claimed = $tx->fetchOne('SELECT agent_map_id,claim_token FROM gc_client_claim WHERE client_id=? FOR UPDATE', array($clientId));
+            if ($claimed && (int)$claimed['agent_map_id'] !== (int)$agentMapId) throw new RuntimeException('CLIENT_ALREADY_CLAIMED');
+            if ($claimed) return array('client_id'=>(int)$clientId, 'already_open'=>true);
+
+            $token = $tx->uuid();
+            $tx->execute('INSERT INTO gc_client_claim (client_id,assignment_id,agent_map_id,claim_token,claimed_at,expires_at) VALUES (?,?,?,?,UTC_TIMESTAMP(),DATE_ADD(UTC_TIMESTAMP(),INTERVAL ' . $ttl . ' SECOND))', array($clientId, $assignment['id'], $agentMapId, $token));
+            $tx->execute('UPDATE gc_client SET state=\'IN_PROGRESS\',terminal=0,managed_at=NULL,updated_at=UTC_TIMESTAMP(),row_version=row_version+1 WHERE id=?', array($clientId));
+            $tx->audit($clientId, $actor, 'CLIENT_REOPENED', $client['state'], 'IN_PROGRESS', array('assignment_id'=>(int)$assignment['id']), $ip);
+            return array('client_id'=>(int)$clientId, 'claim_token'=>$token);
         });
     }
 

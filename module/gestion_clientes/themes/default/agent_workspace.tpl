@@ -1,5 +1,5 @@
 <div class="gc-module gc-workspace" data-gc-workspace="1" data-status-url="{$status_url|default:''|escape:'html'}" data-attempt-id="{$attempt.id|default:''|escape:'html'}" data-gc-outcome-required="{$outcome_required|default:0|escape:'html'}">
-<div class="gc-heading"><h2>{$title|default:'Mi cartera'|escape:'html'}</h2><span class="gc-agent">{$agent.name|default:''|escape:'html'}{if $agent.number|default:''} · {$agent.number|escape:'html'}{/if}</span></div>
+<div class="gc-heading"><h2>{$title|default:'Mi cartera'|escape:'html'}</h2><div><a class="button gc-button-secondary" href="{$history_url|default:'#'|escape:'html'}">Mis clientes llamados</a> <span class="gc-agent">{$agent.name|default:''|escape:'html'}{if $agent.number|default:''} · {$agent.number|escape:'html'}{/if}</span></div></div>
 {if $message|default:''}<div class="gc-alert gc-alert-info">{$message|escape:'html'}</div>{/if}{if !$agent.mapped|default:1}<div class="gc-alert gc-alert-error">{$label_unmapped|default:'Su usuario no tiene un agente y extensión válidos asignados.'|escape:'html'}</div>{/if}
 <section class="gc-seat-panel{if $selected_seat|default:false} gc-seat-selected{/if}" aria-labelledby="gc-seat-title">
 <div class="gc-seat-copy"><h3 id="gc-seat-title">{$label_seat_title|default:'Extensión de esta sesión'|escape:'html'}</h3>

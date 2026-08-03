@@ -16,3 +16,13 @@ canónica. Las entidades principales son:
 - `gc_idempotency`: respuesta estable para reintentos de mutaciones.
 
 Los campos JSON se almacenan como `LONGTEXT` por compatibilidad con MariaDB antiguo.
+## Semántica de resultados
+
+`gc_attempt.business_outcome_id` y `gc_attempt.agent_note` conservan la etiqueta
+y nota informativas de cada llamada. Los campos operativos heredados de
+`gc_outcome` (`terminal`, `resulting_client_state`, `mark_phone_invalid`) no
+alteran el cliente; `requires_callback=1` es la única transición programada y
+crea un registro `gc_callback` abierto.
+
+El historial personal se deriva de `gc_attempt.agent_map_id`, que conserva la
+identidad estable del usuario aunque cambie de extensión o puesto.

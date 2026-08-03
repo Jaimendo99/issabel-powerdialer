@@ -487,6 +487,7 @@ test_case('workspace uses a compact header seat control', function () {
     assert_true(strpos($heading, 'Mis clientes llamados') !== false && strpos($heading, 'gc-seat-compact') !== false, 'History and compact seat controls must share the workspace header');
     assert_true(strpos($template, 'name="sip_extension"') !== false && strpos($template, 'seat_release_url') !== false, 'Compact control must retain change and release operations');
     assert_true(strpos($css, '.gc-seat-popover') !== false, 'Compact seat selector requires a hidden popover');
+    assert_true(strpos($css, '.gc-workspace-tools{align-items:center;display:flex;flex-wrap:nowrap') !== false, 'Desktop workspace actions and agent identity must remain on one row');
 });
 
 test_case('workspace phone view exposes per-number state and attempt history', function () {

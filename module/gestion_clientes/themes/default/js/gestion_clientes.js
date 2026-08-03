@@ -44,6 +44,15 @@
         if (!phoneId || !/^\d+$/.test(String(phoneId))) { return $(); }
         return workspace.find('[data-gc-phone-card][data-phone-id="' + phoneId + '"]').first();
     }
+    function selectPhone(workspace, phoneId) {
+        var card = phoneCard(workspace, phoneId), tabs;
+        if (!card.length) { return; }
+        workspace.find('[data-gc-phone-card]').removeClass('gc-phone-detail-active');
+        card.addClass('gc-phone-detail-active');
+        tabs = workspace.find('[data-gc-phone-select]');
+        tabs.removeClass('gc-phone-tab-active').attr('aria-selected', 'false');
+        tabs.filter('[data-phone-id="' + phoneId + '"]').addClass('gc-phone-tab-active').attr('aria-selected', 'true');
+    }
     function pollAttempt(workspace, count) {
         var url = workspace.attr('data-status-url'), attemptId = workspace.attr('data-attempt-id');
         count = count || 0;
@@ -80,6 +89,9 @@
             return message;
         });
         $('[data-gc-outcome]').each(function () { callbackVisibility(this); }).on('change', function () { callbackVisibility(this); });
+        $('[data-gc-phone-select]').on('click', function () {
+            selectPhone(workspace, $(this).attr('data-phone-id'));
+        });
         $('form').on('submit', function () {
             var field = $(this).find('input[name=idempotency_key]');
             if (field.length && !field.val()) { field.val(idempotencyKey()); }

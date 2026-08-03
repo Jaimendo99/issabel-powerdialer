@@ -500,7 +500,7 @@ test_case('workspace phone view exposes per-number state and attempt history', f
 test_case('workspace renders one prominent call action bound to each phone id', function () {
     $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
     $javascript = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/js/gestion_clientes.js');
-    $matched = preg_match('/\{foreach\s+from=\$client\.phones[^}]*item=p\}(.*?)\{\/foreach\}/s', $template, $parts);
+    $matched = preg_match('/\{foreach\s+from=\$client\.phones[^}]*item=p[^}]*\}(.*?)\{\/foreach\}/s', $template, $parts);
     assert_true($matched === 1, 'Workspace must iterate over every client phone');
     $phoneBlock = $parts[1];
     assert_true(strpos($phoneBlock, '{$p.id') !== false, 'Every phone action must be bound to that iteration phone ID');
@@ -511,6 +511,22 @@ test_case('workspace renders one prominent call action bound to each phone id', 
     assert_true(strpos($phoneBlock, '{$p.attempt_count') !== false, 'Phone card must display its attempt count');
     assert_true((bool) preg_match('/\{\$p\.(last_attempt_at|last_call_at|last_attempt)/', $phoneBlock), 'Phone card must display its last attempt');
     assert_true(strpos($javascript, 'form.serialize()') !== false, 'AJAX call submission must serialize only the clicked phone form');
+});
+
+test_case('workspace selects one phone with side-by-side disposition', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    $javascript = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/js/gestion_clientes.js');
+    $css = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/css/gestion_clientes.css');
+    assert_true(strpos($template, 'class="gc-phone-tabs"') !== false && strpos($template, 'data-gc-phone-select="1"') !== false, 'All numbers must render in a horizontal selector');
+    assert_true(strpos($template, 'gc-phone-detail-active') !== false, 'Exactly one phone detail must be selected initially');
+    assert_true(strpos($template, 'gc-outcome-side') !== false && strpos($template, 'gc-contact-workarea') !== false, 'Result feedback must sit beside the selected number');
+    assert_true(strpos($javascript, 'function selectPhone') !== false && strpos($javascript, "'[data-gc-phone-select]'") !== false, 'Number tabs must switch the selected detail without a reload');
+    assert_true(strpos($css, '.gc-contact-workarea') !== false && strpos($css, '.gc-phone-tabs{display:flex') !== false, 'Desktop phone detail and horizontal selector layout must be styled');
+});
+
+test_case('workspace does not display internal agent identity', function () {
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/agent_workspace.tpl');
+    assert_true(strpos($template, '{$agent.name') === false && strpos($template, '{$agent.number') === false, 'Internal Issabel agent identity must not appear in the workspace header');
 });
 
 test_case('agent access is independent from permanent SIP extension', function () {

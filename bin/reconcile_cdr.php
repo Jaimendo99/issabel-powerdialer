@@ -1,11 +1,27 @@
 #!/usr/bin/env php
 <?php
 
+function gc_cdr_retry_delay($retryCount)
+{
+    // 30, 60, 120 seconds and so on, capped at one hour. This keeps each run bounded
+    // while allowing newer eligible attempts to move through the same index.
+    return min(3600, 30 * pow(2, min(7, max(0, (int)$retryCount))));
+}
+
+function gc_cdr_row_key($row)
+{
+    if (!empty($row['uniqueid'])) return 'u:' . $row['uniqueid'];
+    return 'r:' . md5(serialize($row));
+}
+
+if (defined('GC_RECONCILE_LIBRARY_ONLY')) {
+    return;
+}
 if (PHP_SAPI !== 'cli') { fwrite(STDERR, "CLI only\n"); exit(2); }
 
-$options = getopt('', array('config:', 'limit:', 'min-age:', 'dry-run', 'help'));
+$options = getopt('', array('config:', 'limit:', 'min-age:', 'max-retries:', 'dry-run', 'help'));
 if (isset($options['help'])) {
-    echo "Usage: reconcile_cdr.php [--config FILE] [--limit 1..500] [--min-age SECONDS] [--dry-run]\n";
+    echo "Usage: reconcile_cdr.php [--config FILE] [--limit 1..500] [--min-age SECONDS] [--max-retries 1..100] [--dry-run]\n";
     exit(0);
 }
 $configFile = isset($options['config']) ? $options['config'] : '/etc/issabel/gestion_clientes.conf.php';
@@ -15,7 +31,9 @@ if (!is_array($config)) { fwrite(STDERR, "Invalid config file\n"); exit(2); }
 function gc_env($name, $fallback) { $v = getenv($name); return ($v === false || $v === '') ? $fallback : $v; }
 $limit = isset($options['limit']) ? (int)$options['limit'] : (int)gc_env('GC_RECONCILE_LIMIT', 100);
 $minAge = isset($options['min-age']) ? (int)$options['min-age'] : (int)gc_env('GC_RECONCILE_MIN_AGE', 120);
-if ($limit < 1 || $limit > 500 || $minAge < 0) { fwrite(STDERR, "Invalid bounds\n"); exit(2); }
+$configuredMaxRetries = isset($config['cdr_max_retries']) ? $config['cdr_max_retries'] : 10;
+$maxRetries = isset($options['max-retries']) ? (int)$options['max-retries'] : (int)gc_env('GC_RECONCILE_MAX_RETRIES', $configuredMaxRetries);
+if ($limit < 1 || $limit > 500 || $minAge < 0 || $maxRetries < 1 || $maxRetries > 100) { fwrite(STDERR, "Invalid bounds\n"); exit(2); }
 
 $app = isset($config['app']) ? $config['app'] : array(
     'dsn' => isset($config['db_dsn']) ? $config['db_dsn'] : null,
@@ -44,32 +62,36 @@ try {
     $cdrDb = new PDO($cdrDsn, isset($cdr['user']) ? $cdr['user'] : gc_env('GC_CDR_USER', ''), isset($cdr['password']) ? $cdr['password'] : gc_env('GC_CDR_PASSWORD', ''), $pdoOptions);
 } catch (Exception $e) { fwrite(STDERR, "Database connection failed\n"); exit(1); }
 
+if (!isset($options['dry-run'])) {
+    $heartbeat = $db->prepare('INSERT INTO gc_operational_status (component,last_started_at,last_completed_at,last_status,last_message,details_json,updated_at)'
+        . ' VALUES (\'cdr_reconciler\',UTC_TIMESTAMP(),NULL,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE'
+        . ' last_started_at=UTC_TIMESTAMP(),last_completed_at=NULL,last_status=VALUES(last_status),last_message=VALUES(last_message),details_json=VALUES(details_json),updated_at=UTC_TIMESTAMP()');
+    $heartbeat->execute(array('RUNNING', 'Reconciliation started', '{}'));
+    $heartbeatCompleted = false;
+    register_shutdown_function(function () use ($db, &$heartbeatCompleted) {
+        if ($heartbeatCompleted) return;
+        try {
+            $failed = $db->prepare('UPDATE gc_operational_status SET last_completed_at=UTC_TIMESTAMP(),last_status=\'ERROR\',last_message=\'Reconciliation terminated unexpectedly\',details_json=\'{}\',updated_at=UTC_TIMESTAMP() WHERE component=\'cdr_reconciler\'');
+            $failed->execute();
+        } catch (Exception $ignored) {}
+    });
+}
+
 $cutoff = gmdate('Y-m-d H:i:s', time() - $minAge);
 $sql = 'SELECT a.id,a.phone_id,a.correlation_token,a.cdr_accountcode,a.cdr_retry_count,p.normalized_value FROM gc_attempt a JOIN gc_client_phone p ON p.id=a.phone_id'
-     . ' WHERE a.reconciled_at IS NULL AND a.requested_at<=? AND (a.cdr_next_retry_at IS NULL OR a.cdr_next_retry_at<=UTC_TIMESTAMP())'
+     . ' WHERE a.reconciled_at IS NULL AND a.cdr_exhausted_at IS NULL AND (a.raw_error_code IS NULL OR a.raw_error_code NOT LIKE \'AMI_AGENT_%\')'
+     . ' AND a.requested_at<=? AND (a.cdr_next_retry_at IS NULL OR a.cdr_next_retry_at<=UTC_TIMESTAMP())'
      . ' ORDER BY COALESCE(a.cdr_next_retry_at,a.requested_at) ASC,a.id ASC LIMIT ' . $limit;
 $q = $db->prepare($sql); $q->execute(array($cutoff)); $attempts = $q->fetchAll();
 $cdrSql = 'SELECT calldate,dst,dcontext,channel,dstchannel,lastapp,lastdata,duration,billsec,disposition,'
         . 'accountcode,uniqueid,userfield,' . $linkedIdSelect . ',recordingfile FROM `' . $cdrTable . '` WHERE accountcode=? OR userfield=? ORDER BY calldate,uniqueid';
 $cdrQ = $cdrDb->prepare($cdrSql);
 $update = $db->prepare('UPDATE gc_attempt SET technical_state=?,asterisk_uniqueid=?,linkedid=?,duration_seconds=?,'
-    . 'talk_seconds=?,recording_path=?,raw_error_code=?,answered_at=?,ended_at=?,reconciled_at=UTC_TIMESTAMP() WHERE id=? AND reconciled_at IS NULL');
+    . 'talk_seconds=?,recording_path=?,raw_error_code=?,answered_at=?,ended_at=?,cdr_last_checked_at=UTC_TIMESTAMP(),cdr_last_error=NULL,reconciled_at=UTC_TIMESTAMP() WHERE id=? AND reconciled_at IS NULL');
 $updatePhone = $db->prepare('UPDATE gc_client_phone SET state=? WHERE id=? AND state NOT IN (\'INVALID\',\'DO_NOT_CALL\')');
-$scheduleRetry = $db->prepare('UPDATE gc_attempt SET cdr_retry_count=cdr_retry_count+1,cdr_next_retry_at=DATE_ADD(UTC_TIMESTAMP(),INTERVAL ? SECOND) WHERE id=? AND reconciled_at IS NULL');
-$counts = array('selected' => count($attempts), 'updated' => 0, 'waiting' => 0, 'ambiguous' => 0);
-
-function gc_cdr_retry_delay($retryCount)
-{
-    // 30, 60, 120 seconds and so on, capped at one hour. This keeps each run bounded
-    // while allowing newer eligible attempts to move through the same index.
-    return min(3600, 30 * pow(2, min(7, max(0, (int)$retryCount))));
-}
-
-function gc_cdr_row_key($row)
-{
-    if (!empty($row['uniqueid'])) return 'u:' . $row['uniqueid'];
-    return 'r:' . md5(serialize($row));
-}
+$scheduleRetry = $db->prepare('UPDATE gc_attempt SET cdr_retry_count=cdr_retry_count+1,cdr_next_retry_at=DATE_ADD(UTC_TIMESTAMP(),INTERVAL ? SECOND),cdr_last_checked_at=UTC_TIMESTAMP(),cdr_last_error=? WHERE id=? AND reconciled_at IS NULL AND cdr_exhausted_at IS NULL');
+$exhaustRetry = $db->prepare('UPDATE gc_attempt SET cdr_retry_count=cdr_retry_count+1,cdr_next_retry_at=NULL,cdr_last_checked_at=UTC_TIMESTAMP(),cdr_exhausted_at=UTC_TIMESTAMP(),cdr_last_error=? WHERE id=? AND reconciled_at IS NULL AND cdr_exhausted_at IS NULL');
+$counts = array('selected' => count($attempts), 'updated' => 0, 'waiting' => 0, 'ambiguous' => 0, 'exhausted' => 0, 'errors' => 0);
 
 foreach ($attempts as $attempt) {
     $fullUserfield = 'GC-' . $attempt['correlation_token'];
@@ -77,7 +99,15 @@ foreach ($attempts as $attempt) {
     $rows = $cdrQ->fetchAll();
     if (!$rows) {
         $counts['waiting']++;
-        if (!isset($options['dry-run'])) $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), $attempt['id']));
+        if (!isset($options['dry-run'])) {
+            if ((int)$attempt['cdr_retry_count'] + 1 >= $maxRetries) {
+                $exhaustRetry->execute(array('CDR_NOT_FOUND', $attempt['id']));
+                $counts['exhausted']++;
+                fwrite(STDERR, 'Attempt ' . $attempt['id'] . " exhausted: CDR_NOT_FOUND\n");
+            } else {
+                $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), 'CDR_NOT_FOUND', $attempt['id']));
+            }
+        }
         continue;
     }
     // Correlation tags may be present only on the agent/Local leg. Expand to all
@@ -136,9 +166,24 @@ foreach ($attempts as $attempt) {
             $counts['updated'] += $update->rowCount(); $db->commit();
         } catch (Exception $e) {
             $db->rollBack();
-            $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), $attempt['id']));
+            $counts['errors']++;
+            $errorCode = 'CDR_UPDATE_FAILED';
+            if ((int)$attempt['cdr_retry_count'] + 1 >= $maxRetries) {
+                $exhaustRetry->execute(array($errorCode, $attempt['id']));
+                $counts['exhausted']++;
+            } else {
+                $scheduleRetry->execute(array(gc_cdr_retry_delay($attempt['cdr_retry_count']), $errorCode, $attempt['id']));
+            }
             fwrite(STDERR, 'Attempt ' . $attempt['id'] . " failed\n");
         }
     }
 }
-echo json_encode($counts) . "\n";
+$status = ($counts['exhausted'] > 0 || $counts['errors'] > 0 || $counts['ambiguous'] > 0) ? 'WARNING' : 'OK';
+$message = $status === 'OK' ? 'Reconciliation completed' : 'Reconciliation requires attention';
+$details = json_encode($counts);
+if (!isset($options['dry-run'])) {
+    $finished = $db->prepare('UPDATE gc_operational_status SET last_completed_at=UTC_TIMESTAMP(),last_status=?,last_message=?,details_json=?,updated_at=UTC_TIMESTAMP() WHERE component=\'cdr_reconciler\'');
+    $finished->execute(array($status, $message, $details));
+    $heartbeatCompleted = true;
+}
+echo $details . "\n";

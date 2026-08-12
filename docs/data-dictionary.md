@@ -8,12 +8,14 @@ canónica. Las entidades principales son:
 - `gc_client`, `gc_client_phone`: cliente, datos arbitrarios y teléfonos ordenados.
 - `gc_agent_map`: enlace verificado entre identidades web, Call Center y SIP.
 - `gc_assignment`: historial de asignaciones; solo una activa por cliente.
-- `gc_client_claim`: lease por pestaña/agente para impedir trabajo concurrente.
+- `gc_client_claim`: lease por cliente/agente para impedir trabajo concurrente;
+  una restricción única garantiza como máximo un cliente actual por agente.
 - `gc_attempt`: registro técnico y comercial inmutable de cada intento.
 - `gc_outcome`: catálogo configurable de transiciones.
 - `gc_callback`: agenda UTC de devoluciones.
 - `gc_client_event`: auditoría append-only.
 - `gc_idempotency`: respuesta estable para reintentos de mutaciones.
+- `gc_operational_status`: último heartbeat y resultado de procesos de producción.
 
 Los campos JSON se almacenan como `LONGTEXT` por compatibilidad con MariaDB antiguo.
 ## Semántica de resultados
@@ -26,3 +28,8 @@ crea un registro `gc_callback` abierto.
 
 El historial personal se deriva de `gc_attempt.agent_map_id`, que conserva la
 identidad estable del usuario aunque cambie de extensión o puesto.
+
+La reconciliación CDR registra en `gc_attempt` el número de reintentos, última
+comprobación, error y fecha de agotamiento. Un intento agotado no se vuelve a
+procesar automáticamente y requiere revisión; no se elimina ni se inventa un
+resultado técnico.

@@ -3,4 +3,6 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin
 
 # Asterisk can write related CDR legs a few seconds apart. Reconcile only calls
 # older than two minutes, and prevent overlapping runs if a database is slow.
-* * * * * root /usr/bin/flock -n /var/run/gestion-clientes-reconcile.lock /usr/local/sbin/gestion-clientes-reconcile-cdr --config /etc/issabel/gestion_clientes.conf.php --limit 100 --min-age 120 >/dev/null
+* * * * * root /usr/bin/flock -n /var/run/gestion-clientes-reconcile.lock /usr/local/sbin/gestion-clientes-reconcile-cdr --config /etc/issabel/gestion_clientes.conf.php --limit 100 --min-age 120 --max-retries 10 >>/var/log/gestion-clientes-reconcile.log 2>&1
+*/5 * * * * root /usr/local/sbin/gestion-clientes-health-alert >/dev/null 2>&1
+*/5 * * * * root /usr/bin/flock -n /var/run/gestion-clientes-claims.lock /usr/local/sbin/gestion-clientes-cleanup-claims --config /etc/issabel/gestion_clientes.conf.php --limit 250 >>/var/log/gestion-clientes-reconcile.log 2>&1

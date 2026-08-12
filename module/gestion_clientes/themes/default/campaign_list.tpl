@@ -1,6 +1,6 @@
 <div class="gc-module">
   <div class="gc-heading"><h2>{$title|default:'Campañas'|escape:'html'}</h2><a class="button" href="{$create_url|escape:'html'}">Nueva campaña</a></div>
-  <nav class="gc-actions"><a href="{$import_url|escape:'html'}">Importar</a><a href="{$assignment_url|escape:'html'}">Asignar</a><a href="{$mapping_url|escape:'html'}">Agentes</a><a href="{$seats_url|escape:'html'}">Puestos</a><a href="{$callbacks_url|escape:'html'}">Callbacks</a><a href="{$audit_url|escape:'html'}">Auditoría</a></nav>
+  <nav class="gc-actions"><a href="{$import_url|escape:'html'}">Importar</a><a href="{$assignment_url|escape:'html'}">Asignar</a><a href="{$reassignment_url|escape:'html'}">Reasignar</a><a href="{$mapping_url|escape:'html'}">Agentes</a><a href="{$seats_url|escape:'html'}">Puestos</a><a href="{$callbacks_url|escape:'html'}">Callbacks</a><a href="{$audit_url|escape:'html'}">Auditoría</a></nav>
   {if $message|default:''}<div class="gc-alert gc-alert-info">{$message|escape:'html'}</div>{/if}
   <form class="gc-filters" method="get" action="{$action_url|default:''|escape:'html'}">
     <input type="hidden" name="menu" value="gestion_clientes" /><input type="hidden" name="action" value="campaign_list" />

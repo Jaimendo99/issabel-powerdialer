@@ -6,7 +6,10 @@
 2. Importe un CSV, asigne ID, nombre, teléfonos y campos adicionales; revise errores.
 3. Verifique el mapa permanente usuario/agente y configure las extensiones de puestos disponibles.
 4. Previsualice la asignación y confirme la cantidad.
-5. Supervise pendientes, callbacks, resultados y llamadas rechazadas.
+5. Use **Reasignar** para transferir un cliente disponible cuando cambie su
+   responsable. El historial y los callbacks se conservan. La operación se
+   bloquea si el cliente está abierto, en llamada o espera un resultado.
+6. Supervise pendientes, callbacks, resultados y llamadas rechazadas.
 
 ## Agente
 
@@ -34,3 +37,27 @@ muestra su último intento, resultado, nota, número y callback pendiente. El
 botón **Abrir** crea una nueva toma explícita para ese mismo agente. No permite
 tomar un cliente que haya sido reasignado a otra persona ni abandonar una
 llamada o resultado todavía pendiente.
+
+La pantalla **Callbacks** permite reprogramar o cancelar una devolución pendiente.
+No se puede modificar mientras el cliente esté abierto o tenga una llamada activa;
+el agente solo gestiona callbacks propios y el supervisor puede gestionar todos.
+
+El panel operativo separa resultados comerciales de estados técnicos y permite
+exportar el detalle de llamadas del período en CSV.
+
+## Salud operativa
+
+Antes de habilitar un piloto y después de una actualización, el operador ejecuta:
+
+```sh
+gestion-clientes-production-check
+```
+
+No iniciar pruebas si devuelve estado crítico. Las advertencias por intentos
+ambiguos, reconciliación agotada o callbacks vencidos deben revisarse antes de
+ampliar el volumen. El detalle del reconciliador queda en
+`/var/log/gestion-clientes-reconcile.log` y rota diariamente.
+
+Pausar o cerrar una campaña bloquea nuevas tomas y llamadas desde este módulo sin
+interrumpir llamadas que ya estén en curso. Use **Pausada** como paro operativo;
+no reinicie Asterisk para detener una campaña de Gestión de Clientes.

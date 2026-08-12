@@ -35,6 +35,44 @@ class GestionClientesStats
         );
     }
 
+    public function agentPerformance($campaignId, $fromUtc, $toUtc)
+    {
+        return $this->db->fetchAll(
+            'SELECT am.issabel_username AS agent,am.agent_number,COUNT(at.id) AS total_calls,COUNT(DISTINCT at.client_id) AS clients_called,'
+            . ' SUM(CASE WHEN at.technical_state=\'ANSWERED\' THEN 1 ELSE 0 END) AS answered,'
+            . ' SUM(CASE WHEN at.technical_state IN (\'NO_ANSWER\',\'BUSY\') THEN 1 ELSE 0 END) AS not_answered,'
+            . ' SUM(CASE WHEN at.technical_state IN (\'FAILED\',\'CANCELED\',\'AMBIGUOUS\') THEN 1 ELSE 0 END) AS failed,'
+            . ' SUM(CASE WHEN at.business_outcome_id IS NOT NULL THEN 1 ELSE 0 END) AS outcomes_saved,COALESCE(SUM(at.talk_seconds),0) AS talk_seconds'
+            . ' FROM gc_agent_map am LEFT JOIN gc_attempt at ON at.agent_map_id=am.id AND at.campaign_id=? AND at.requested_at>=? AND at.requested_at<?'
+            . ' AND (at.raw_error_code IS NULL OR LEFT(at.raw_error_code,10)<>\'AMI_AGENT_\')'
+            . ' GROUP BY am.id,am.issabel_username,am.agent_number HAVING COUNT(at.id)>0 ORDER BY total_calls DESC,am.issabel_username',
+            array($campaignId, $fromUtc, $toUtc)
+        );
+    }
+
+    public function technicalBreakdown($campaignId, $fromUtc, $toUtc)
+    {
+        return $this->db->fetchAll(
+            'SELECT technical_state AS result,COUNT(*) AS total FROM gc_attempt WHERE campaign_id=? AND requested_at>=? AND requested_at<?'
+            . ' AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\') GROUP BY technical_state ORDER BY total DESC,technical_state',
+            array($campaignId, $fromUtc, $toUtc)
+        );
+    }
+
+    public function attemptExport($campaignId, $fromUtc, $toUtc, $limit)
+    {
+        $limit = max(1, min(50000, (int)$limit));
+        return $this->db->fetchAll(
+            'SELECT at.id AS attempt_id,at.requested_at,at.answered_at,at.ended_at,c.external_key,c.display_name,p.original_value AS phone,'
+            . ' am.issabel_username AS agent,at.agent_sip_extension,at.technical_state,o.label AS outcome,at.duration_seconds,at.talk_seconds,at.agent_note,at.recording_path'
+            . ' FROM gc_attempt at JOIN gc_client c ON c.id=at.client_id JOIN gc_client_phone p ON p.id=at.phone_id'
+            . ' JOIN gc_agent_map am ON am.id=at.agent_map_id LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id'
+            . ' WHERE at.campaign_id=? AND at.requested_at>=? AND at.requested_at<?'
+            . ' AND (at.raw_error_code IS NULL OR LEFT(at.raw_error_code,10)<>\'AMI_AGENT_\') ORDER BY at.requested_at,at.id LIMIT ' . $limit,
+            array($campaignId, $fromUtc, $toUtc)
+        );
+    }
+
     public function outcomeBreakdown($campaignId, $fromUtc, $toUtc)
     {
         return $this->db->fetchAll(

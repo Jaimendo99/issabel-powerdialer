@@ -28,6 +28,45 @@ la base SQLite que realmente contenga ACL, después de descubrirla con
 
 ## Código y base
 
+Antes de aplicar la migración 6, confirmar que cada agente tenga como máximo una
+toma actual. No borrar duplicados automáticamente: revisar llamadas y resultados
+pendientes, conservar la toma correcta y liberar la otra de forma auditada.
+
+```sql
+SELECT agent_map_id, COUNT(*) AS claims
+FROM gc_client_claim
+GROUP BY agent_map_id
+HAVING COUNT(*) > 1;
+```
+
+Si devuelve filas, el instalador se detendrá antes de migrar. Para cada agente:
+
+1. Listar sus tomas con cliente, vencimiento y trabajo no resuelto:
+
+```sql
+SELECT cl.agent_map_id, cl.client_id, cl.assignment_id, cl.claimed_at, cl.expires_at,
+       SUM(CASE WHEN at.ended_at IS NULL THEN 1 ELSE 0 END) AS llamadas_activas,
+       SUM(CASE WHEN at.ended_at IS NOT NULL AND at.business_outcome_id IS NULL
+                 AND (at.raw_error_code IS NULL OR at.raw_error_code NOT LIKE 'AMI_AGENT_%')
+                THEN 1 ELSE 0 END) AS resultados_pendientes
+FROM gc_client_claim cl
+LEFT JOIN gc_attempt at ON at.assignment_id=cl.assignment_id
+WHERE cl.agent_map_id = ID_AGENTE
+GROUP BY cl.agent_map_id, cl.client_id, cl.assignment_id, cl.claimed_at, cl.expires_at
+ORDER BY cl.claimed_at DESC;
+```
+
+2. Conservar siempre la toma con llamada activa o resultado pendiente. Si hay más
+   de una toma protegida, detener la migración y reconciliar cada intento; no
+   liberar ninguna automáticamente.
+3. Sólo una toma adicional confirmada sin intento activo ni resultado pendiente
+   puede liberarse: restaurar primero el cliente a `CALLBACK` si tiene callback
+   abierto o a `PENDING` en caso contrario, registrar `CLAIM_RELEASED_PRE_MIGRATION`
+   en `gc_client_event` y después borrar esa fila de `gc_client_claim`, todo dentro
+   de una transacción revisada por el operador.
+4. Repetir la consulta inicial hasta obtener cero filas antes de ejecutar el
+   instalador. Conservar el dump previo y el registro de los IDs liberados.
+
 Ejecutar `install/install.sh` con una cuenta de migración. El nombre de base solo
 acepta letras ASCII, números y `_`; el puerto debe estar entre 1 y 65535. El
 instalador termina la migración antes de publicar el nuevo árbol del módulo y
@@ -77,3 +116,38 @@ menú no sustituye la autorización del módulo.
    ante un intento ambiguo, duplicado o sin reconciliar; no pulsar llamar de nuevo.
 
 No se modifica el marcador tradicional en ningún paso.
+
+## Operación de producción
+
+Después de aplicar la migración de base, instalar las herramientas operativas sin
+cambiar cron:
+
+```sh
+cd /root/issabel-powerdialer
+install/install-operations.sh
+gestion-clientes-production-check
+```
+
+Instalar o reemplazar el cron solamente durante una ventana aprobada:
+
+```sh
+install/install-operations.sh --install-cron
+```
+
+El reconciliador conserva un heartbeat en `gc_operational_status`, limita cada
+intento a 10 búsquedas y marca los agotados para revisión. El chequeo de salud
+devuelve `0` (OK), `1` (advertencia operativa) o `2` (crítico/no marcar).
+
+Crear y verificar un respaldo antes de cada actualización de esquema u operación
+de Asterisk. La herramienta copia todos los archivos `*.db` del directorio SQLite
+de Issabel mediante el respaldo en línea de SQLite y verifica su integridad; si la
+instalación usa otra ruta, indicarla con `--issabel-db-dir`. Requiere `sqlite3`:
+
+```sh
+GC_BACKUP_DIR=$(gestion-clientes-backup | sed -n 's/^Backup completed: //p')
+test -n "$GC_BACKUP_DIR"
+gestion-clientes-verify-backup "$GC_BACKUP_DIR"
+```
+
+Los respaldos contienen datos y secretos: conservarlos bajo `/root`, no copiarlos
+al web root y aplicar la política de retención aprobada.

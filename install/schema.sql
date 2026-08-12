@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS gc_client_claim (
   expires_at DATETIME NOT NULL,
   PRIMARY KEY (client_id),
   UNIQUE KEY uq_gc_claim_token (claim_token),
+  UNIQUE KEY uq_gc_claim_agent (agent_map_id),
   KEY idx_gc_claim_agent (agent_map_id, expires_at),
   CONSTRAINT fk_gc_claim_client FOREIGN KEY (client_id) REFERENCES gc_client(id),
   CONSTRAINT fk_gc_claim_assignment FOREIGN KEY (assignment_id) REFERENCES gc_assignment(id),
@@ -209,6 +210,9 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   raw_error_code VARCHAR(100) NULL,
   cdr_retry_count INT UNSIGNED NOT NULL DEFAULT 0,
   cdr_next_retry_at DATETIME NULL,
+  cdr_last_checked_at DATETIME NULL,
+  cdr_exhausted_at DATETIME NULL,
+  cdr_last_error VARCHAR(100) NULL,
   reconciled_at DATETIME NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_gc_attempt_token (correlation_token),
@@ -218,6 +222,7 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   KEY idx_gc_attempt_outcome_date (business_outcome_id, requested_at),
   UNIQUE KEY uq_gc_attempt_cdr_accountcode (cdr_accountcode),
   KEY idx_gc_attempt_unreconciled (reconciled_at, cdr_next_retry_at, requested_at),
+  KEY idx_gc_attempt_cdr_attention (cdr_exhausted_at, reconciled_at, requested_at),
   CONSTRAINT fk_gc_attempt_campaign FOREIGN KEY (campaign_id) REFERENCES gc_campaign(id),
   CONSTRAINT fk_gc_attempt_client FOREIGN KEY (client_id) REFERENCES gc_client(id),
   CONSTRAINT fk_gc_attempt_phone FOREIGN KEY (phone_id) REFERENCES gc_client_phone(id),
@@ -225,6 +230,18 @@ CREATE TABLE IF NOT EXISTS gc_attempt (
   CONSTRAINT fk_gc_attempt_agent FOREIGN KEY (agent_map_id) REFERENCES gc_agent_map(id),
   CONSTRAINT fk_gc_attempt_work_session FOREIGN KEY (work_session_id) REFERENCES gc_work_session(id),
   CONSTRAINT fk_gc_attempt_outcome FOREIGN KEY (business_outcome_id) REFERENCES gc_outcome(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+CREATE TABLE IF NOT EXISTS gc_operational_status (
+  component VARCHAR(60) NOT NULL,
+  last_started_at DATETIME NULL,
+  last_completed_at DATETIME NULL,
+  last_status VARCHAR(20) NOT NULL,
+  last_message VARCHAR(255) NULL,
+  details_json LONGTEXT NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (component),
+  KEY idx_gc_operational_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS gc_callback (

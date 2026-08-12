@@ -48,6 +48,15 @@ if [ "$SKIP_DB" -eq 0 ]; then
     --database=mysql --execute="CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci"
   sed "s/\`gestion_clientes\`/\`$DB_NAME\`/g" "$SCRIPT_DIR/schema.sql" | \
     MYSQL_PWD=${MYSQL_PWD-} mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
+  GC_DUPLICATE_CLAIMS=$(MYSQL_PWD=${MYSQL_PWD-} mysql -N -B -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" \
+    --execute='SELECT COUNT(*) FROM (SELECT agent_map_id FROM gc_client_claim GROUP BY agent_map_id HAVING COUNT(*)>1) duplicate_agents')
+  if [ "$GC_DUPLICATE_CLAIMS" -gt 0 ]; then
+    echo "Migration blocked: $GC_DUPLICATE_CLAIMS agent(s) have more than one current client." >&2
+    MYSQL_PWD=${MYSQL_PWD-} mysql -N -B -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" \
+      --execute='SELECT agent_map_id,GROUP_CONCAT(client_id ORDER BY claimed_at) AS client_ids FROM gc_client_claim GROUP BY agent_map_id HAVING COUNT(*)>1' >&2
+    echo "Review active calls and pending outcomes; see docs/deployment.md. No claim was deleted." >&2
+    exit 1
+  fi
   for GC_MIGRATION in "$SCRIPT_DIR"/migrations/*.sql; do
     [ -f "$GC_MIGRATION" ] || continue
     sed "s/\`gestion_clientes\`/\`$DB_NAME\`/g" "$GC_MIGRATION" | \

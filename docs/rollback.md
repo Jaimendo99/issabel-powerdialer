@@ -31,8 +31,17 @@ La restauración de base requiere aprobación explícita porque sobrescribe dato
 posteriores al respaldo:
 
 ```sh
-test -s "$GC_BACKUP_DIR/gestion_clientes.sql"
-mysql -h localhost -uroot -p gestion_clientes < "$GC_BACKUP_DIR/gestion_clientes.sql"
+if [ -s "$GC_BACKUP_DIR/database.sql" ]; then
+  gestion-clientes-verify-backup "$GC_BACKUP_DIR"
+  # database.sql fue creado con --databases e incluye CREATE DATABASE y USE.
+  mysql -h localhost -uroot -p < "$GC_BACKUP_DIR/database.sql"
+elif [ -s "$GC_BACKUP_DIR/gestion_clientes.sql" ]; then
+  # Formato manual heredado de la puerta inicial de despliegue.
+  mysql -h localhost -uroot -p gestion_clientes < "$GC_BACKUP_DIR/gestion_clientes.sql"
+else
+  echo "No hay dump restaurable" >&2
+  exit 1
+fi
 ```
 
 `install/uninstall.sh --purge-data` se permite únicamente con aprobación separada,

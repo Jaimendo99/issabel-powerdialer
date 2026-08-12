@@ -77,6 +77,13 @@ class GestionClientesValidator
                 $errors[] = 'CALLBACK_REQUIRED';
             } elseif (!self::validTimezone($callback['timezone'])) {
                 $errors[] = 'INVALID_TIMEZONE';
+            } else {
+                try {
+                    $utc = self::localToUtc($callback['due_at'], $callback['timezone']);
+                    if (strtotime($utc . ' UTC') <= time()) $errors[] = 'CALLBACK_MUST_BE_FUTURE';
+                } catch (Exception $e) {
+                    $errors[] = 'CALLBACK_DATE_INVALID';
+                }
             }
         }
         return $errors;
@@ -100,7 +107,15 @@ class GestionClientesValidator
         if (!self::validTimezone($timezone)) {
             throw new InvalidArgumentException('INVALID_TIMEZONE');
         }
-        $date = new DateTime($value, new DateTimeZone($timezone));
+        $value = trim((string)$value);
+        $format = preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $value) ? '!Y-m-d H:i:s' : '!Y-m-d H:i';
+        if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?$/', $value)) {
+            throw new InvalidArgumentException('CALLBACK_DATE_INVALID');
+        }
+        $date = DateTime::createFromFormat($format, $value, new DateTimeZone($timezone));
+        if (!$date || $date->format(substr($format, 1)) !== $value) {
+            throw new InvalidArgumentException('CALLBACK_DATE_INVALID');
+        }
         $date->setTimezone(new DateTimeZone('UTC'));
         return $date->format('Y-m-d H:i:s');
     }

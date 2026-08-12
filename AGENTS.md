@@ -24,6 +24,9 @@ It is independent of Issabel's traditional dialer. Do not write to `call_center.
 - `asterisk/`: reviewed dialplan and AMI examples; installation is intentionally manual.
 - `bin/finalize_call.php`: immediate post-call settlement from the dialplan.
 - `bin/reconcile_cdr.php`: fallback CDR reconciliation.
+- `bin/cleanup_claims.php`: safely returns abandoned untouched clients to the queue.
+- `bin/health_check.php`, `bin/production_check.sh`: database and integration readiness checks.
+- `bin/backup.sh`, `bin/verify_backup.sh`: private, checksummed production backups.
 - `tests/run.php`: main behavior and regression suite.
 - `docs/architecture.md`, `docs/deployment.md`, `docs/rollback.md`: authoritative operational guidance.
 - `docs/plans/issabel-client-assignment-module.md`: original product and implementation plan.
@@ -46,10 +49,12 @@ Run before committing:
 make check
 make test
 make install-smoke
+make shell-check
+make db-test
 git diff --check
 ```
 
-`make test` requires PHP. If local PHP is unavailable, `make check` still performs static PHP 5.4 checks; run `php tests/run.php` on the Issabel server before declaring success. The current expected result is **45 tests, 0 failures**; update this number when tests are added.
+`make test` requires PHP. If local PHP is unavailable, `make check` still performs static PHP 5.4 checks; run `php tests/run.php` on the Issabel server before declaring success. The current expected result is **56 tests, 0 failures**; update this number when tests are added.
 
 For Smarty changes, compile the template on Issabel before publishing because its real PHP/Smarty versions are authoritative.
 
@@ -77,6 +82,8 @@ php tests/run.php
 
 The installer builds a staged module, atomically replaces the live tree, and archives the previous version as `/var/www/html/modules/.gestion_clientes.previous.*`. It does **not** install menu/ACL, AMI, dialplan, or cron changes.
 
+Operational CLI tools are installed separately with `install/install-operations.sh`. It does not replace cron unless `--install-cron` is explicitly supplied in an approved window. Apply schema migration 6 before installing the updated reconciler.
+
 After verification, commit and push to `main`. Do not commit credentials, dumps, uploaded CSVs, generated files, or production configuration.
 
 ## Production safety
@@ -87,3 +94,4 @@ After verification, commit and push to `main`. Do not commit credentials, dumps,
 - Use synthetic clients and controlled phone destinations for call tests.
 - Do not retry ambiguous calls: inspect `gc_attempt`, Asterisk/CDR state, and logs first.
 - Preserve the installer's `.previous.*` archive and follow `docs/rollback.md` for recovery.
+- Run `gestion-clientes-production-check` before a pilot. Exit `2` means do not dial; exit `1` requires operational review.

@@ -22,6 +22,8 @@ recarga de Asterisk requieren una ventana aprobada; consulte
 make check
 make test
 make install-smoke
+make shell-check
+make db-test
 ```
 
 `make test` usa el intérprete indicado por `PHP_BIN` (por defecto `php`).
@@ -36,6 +38,14 @@ sudo install/install.sh --module-root /var/www/html/modules \
 El instalador no modifica archivos de Asterisk automáticamente. Copie y revise los
 ejemplos de `asterisk/` durante una ventana aprobada. Tampoco almacena credenciales
 AMI en el repositorio.
+
+Las herramientas de salud, respaldo y reconciliación se instalan por separado:
+
+```bash
+sudo install/install-operations.sh
+```
+
+El cron solo se reemplaza con `--install-cron` durante una ventana aprobada.
 
 ## Seguridad
 

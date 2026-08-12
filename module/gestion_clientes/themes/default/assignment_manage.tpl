@@ -1,0 +1,14 @@
+<div class="gc-module">
+  <h2>Reasignación de clientes</h2>
+  <p class="gc-page-help">Transfiera un cliente disponible a otro agente. Su historial, teléfonos y callbacks se conservan.</p>
+  <form class="gc-filters" method="get" action="{$filter_url|default:''|escape:'html'}">
+    <input type="hidden" name="menu" value="gestion_clientes" /><input type="hidden" name="action" value="assignment_manage" />
+    <label>Campaña <select name="campaign_id"><option value="0">Todas</option>{foreach from=$campaigns|default:array() item=c}<option value="{$c.id|default:0|escape:'html'}"{if $filters.campaign_id|default:0 == $c.id|default:0} selected="selected"{/if}>{$c.name|default:''|escape:'html'}</option>{/foreach}</select></label>
+    <label>Agente actual <select name="agent_map_id"><option value="0">Todos</option>{foreach from=$agents|default:array() item=a}<option value="{$a.id|default:0|escape:'html'}"{if $filters.agent_map_id|default:0 == $a.id|default:0} selected="selected"{/if}>{$a.name|default:''|escape:'html'}</option>{/foreach}</select></label>
+    <label>Cliente o ID <input type="text" name="q" value="{$filters.q|default:''|escape:'html'}" /></label>
+    <button type="submit">Filtrar</button>
+  </form>
+  <div class="gc-table-wrap"><table class="gc-table"><thead><tr><th>Campaña</th><th>Cliente</th><th>Agente actual</th><th>Estado</th><th>Callback</th><th>Reasignar</th></tr></thead><tbody>
+  {foreach from=$assignments|default:array() item=row}<tr><td>{$row.campaign_name|default:''|escape:'html'}</td><td><strong>{$row.display_name|default:''|escape:'html'}</strong><br /><small>{$row.external_key|default:''|escape:'html'}</small></td><td>{$row.agent_name|default:''|escape:'html'}</td><td>{$row.state|default:''|escape:'html'}</td><td>{$row.callback_at|default:'—'|escape:'html'}</td><td>{if $row.can_reassign|default:0}<form method="post" action="{$action_url|default:''|escape:'html'}" class="gc-reassign-form"><input type="hidden" name="csrf_token" value="{$csrf_token|default:''|escape:'html'}" /><input type="hidden" name="idempotency_key" value="{$row.idempotency_key|default:''|escape:'html'}" /><input type="hidden" name="assignment_id" value="{$row.assignment_id|default:0|escape:'html'}" /><select name="new_agent_map_id" required="required"><option value="">Nuevo agente…</option>{foreach from=$agents|default:array() item=target}{if $target.id|default:0 != $row.agent_map_id|default:0}<option value="{$target.id|default:0|escape:'html'}">{$target.name|default:''|escape:'html'}</option>{/if}{/foreach}</select><input type="text" name="reason" maxlength="255" placeholder="Motivo" required="required" /><button type="submit">Reasignar</button></form>{else}<span class="gc-muted">En uso o con resultado pendiente</span>{/if}</td></tr>{foreachelse}<tr><td colspan="6" class="gc-empty">No hay asignaciones activas para mostrar.</td></tr>{/foreach}
+  </tbody></table></div>
+</div>

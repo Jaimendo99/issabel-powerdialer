@@ -100,6 +100,62 @@ class FakeSeatTakeoverDb
     public function lastInsertId() { return $this->lastId; }
 }
 
+class FakeAssignmentDb
+{
+    public $hasClaim = false;
+    public $hasUnresolvedAttempt = false;
+    public $executed = array();
+    public $audits = array();
+
+    public function transaction($callback) { return call_user_func($callback, $this); }
+    public function fetchOne($sql, $params)
+    {
+        if (strpos($sql, 'SELECT a.*, c.state') !== false) return array('id'=>12,'campaign_id'=>3,'client_id'=>44,'agent_map_id'=>7,'assignment_state'=>'ACTIVE','state'=>'CALLBACK','terminal'=>0,'campaign_status'=>'ACTIVE');
+        if (strpos($sql, 'FROM gc_agent_map') !== false) return array('id'=>(int)$params[0]);
+        if (strpos($sql, 'FROM gc_client_claim') !== false) return $this->hasClaim ? array('client_id'=>44) : null;
+        if (strpos($sql, 'FROM gc_attempt') !== false) return $this->hasUnresolvedAttempt ? array('id'=>90) : null;
+        throw new RuntimeException('Unexpected assignment fake query: ' . $sql);
+    }
+    public function execute($sql, $params) { $this->executed[] = array('sql'=>$sql,'params'=>$params); return true; }
+    public function pdo() { return $this; }
+    public function lastInsertId() { return 99; }
+    public function audit($clientId, $actor, $type, $previous, $new, $metadata, $ip) { $this->audits[] = array('client_id'=>$clientId,'type'=>$type,'metadata'=>$metadata); }
+}
+
+class FakeProtectedClaimDb
+{
+    public $insertedClaim = false;
+    public $existingClaimSql = '';
+
+    public function transaction($callback) { return call_user_func($callback, $this); }
+    public function fetchAll($sql, $params)
+    {
+        if (strpos($sql, 'FROM gc_client_claim cl JOIN gc_client c') !== false) return array();
+        if (strpos($sql, 'FROM gc_client_phone') !== false) return array();
+        if (strpos($sql, 'FROM (SELECT phone_id') !== false) return array();
+        if (strpos($sql, 'FROM gc_attempt at LEFT JOIN') !== false) return array();
+        throw new RuntimeException('Unexpected protected-claim fake query: ' . $sql);
+    }
+    public function fetchOne($sql, $params)
+    {
+        if (strpos($sql, 'FROM gc_agent_map') !== false) return array('id'=>(int)$params[0]);
+        if (strpos($sql, 'FROM gc_client_claim cl JOIN gc_client c') !== false) {
+            $this->existingClaimSql = $sql;
+            if (strpos($sql, 'cl.expires_at>UTC_TIMESTAMP()') !== false) return null;
+            return array('id'=>44,'campaign_id'=>3,'external_key'=>'protected','display_name'=>'Protected client','state'=>'IN_PROGRESS','terminal'=>0,'custom_data_json'=>'{}','assignment_id'=>12,'claim_token'=>'old-token','expires_at'=>'2020-01-01 00:00:00');
+        }
+        if (strpos($sql, 'FROM gc_assignment a JOIN gc_client c') !== false) return array('id'=>55,'campaign_id'=>3,'external_key'=>'next','display_name'=>'Next client','state'=>'PENDING','terminal'=>0,'custom_data_json'=>'{}','assignment_id'=>13);
+        throw new RuntimeException('Unexpected protected-claim fake query: ' . $sql);
+    }
+    public function execute($sql, $params)
+    {
+        if (strpos($sql, 'INSERT INTO gc_client_claim') !== false) $this->insertedClaim = true;
+        return true;
+    }
+    public function uuid() { return '123e4567-e89b-42d3-a456-426614174000'; }
+    public function audit($clientId, $actor, $type, $previous, $new, $metadata, $ip) {}
+}
+
 function fake_ami_originate($frames, $holdOpenSeconds)
 {
     gc_require_class('GestionClientesDialer', 'module/gestion_clientes/libs/GestionClientesDialer.class.php');
@@ -159,6 +215,18 @@ test_case('complete callback outcome is valid', function () {
     assert_true($valid, 'Complete callback data should validate; received ' . var_export($actual, true));
 });
 
+test_case('callback dates are strict and future-only', function () {
+    gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
+    assert_same('2030-08-01 19:30:00', GestionClientesValidator::localToUtc('2030-08-01 14:30', 'America/Guayaquil'), 'Callback local time must convert to UTC');
+    try {
+        GestionClientesValidator::localToUtc('2030-02-30 14:30', 'America/Guayaquil');
+        throw new RuntimeException('Impossible callback date was accepted');
+    } catch (InvalidArgumentException $expected) {}
+    $outcome = array('active'=>1,'resulting_client_state'=>'CALLBACK','requires_callback'=>1);
+    $errors = GestionClientesValidator::validateOutcome($outcome, array('due_at'=>'2020-01-01 10:00','timezone'=>'America/Guayaquil','note'=>'past'));
+    assert_true(in_array('CALLBACK_MUST_BE_FUTURE', $errors, true), 'Past callbacks must not be scheduled');
+});
+
 test_case('CSV import detects delimiter and maps rows', function () {
     gc_require_class('GestionClientesValidator', 'module/gestion_clientes/libs/GestionClientesValidator.class.php');
     gc_require_class('GestionClientesImport', 'module/gestion_clientes/libs/GestionClientesImport.class.php');
@@ -212,10 +280,13 @@ test_case('CSV import expands a semicolon phone list into grouped client phones'
 
 test_case('schema contains concurrency and idempotency safeguards', function () {
     $sql = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
+    $installer = file_get_contents(GC_PROJECT_ROOT . '/install/install.sh');
     assert_true(strpos($sql, 'UNIQUE KEY uq_gc_attempt_idempotency') !== false, 'Attempt idempotency constraint is missing');
     assert_true(strpos($sql, 'UNIQUE KEY uq_gc_claim_token') !== false, 'Claim token constraint is missing');
+    assert_true(strpos($sql, 'UNIQUE KEY uq_gc_claim_agent (agent_map_id)') !== false, 'Database must enforce one current client per durable agent');
     assert_true(strpos($sql, 'ENGINE=InnoDB') !== false, 'Transactional InnoDB tables are required');
     assert_true(strpos($sql, 'gc_idempotency') !== false, 'General mutation idempotency table is missing');
+    assert_true(strpos($installer, 'GC_DUPLICATE_CLAIMS') !== false && strpos($installer, 'No claim was deleted') !== false, 'Installer must fail clearly before migrating legacy duplicate agent claims');
 });
 
 test_case('seed outcomes include callback policy', function () {
@@ -315,6 +386,16 @@ test_case('agent cannot start another call before resolving the previous attempt
     assert_true(strpos($index, 'OUTCOME_REQUIRED_BEFORE_CALL') !== false, 'The API must expose a stable pending-outcome error');
 });
 
+test_case('campaign status is an enforceable dialing stop', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $assignment = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesAssignment.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    assert_true(substr_count($workflow, "camp.status=\'ACTIVE\'") >= 2, 'Only active campaigns may be claimed or called');
+    assert_true(strpos($workflow, 'CAMPAIGN_NOT_ACTIVE') !== false, 'A paused or closed campaign must return an explicit call error');
+    assert_true(strpos($assignment, 'CAMPAIGN_NOT_ASSIGNABLE') !== false, 'Closed campaigns must reject new assignment commits');
+    assert_true(strpos($index, "'CAMPAIGN_NOT_ACTIVE'") !== false, 'Agents need a clear paused-campaign message');
+});
+
 test_case('uncertain AMI responses remain unresolved instead of triggering a duplicate retry', function () {
     $dialer = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesDialer.class.php');
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
@@ -329,8 +410,31 @@ test_case('uncertain AMI responses remain unresolved instead of triggering a dup
 test_case('queue only auto-claims untouched clients or due callbacks', function () {
     $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
     assert_true(strpos($workflow, "c.state=\\'PENDING\\' AND NOT EXISTS") !== false, 'Called informational outcomes must not immediately re-enter the automatic queue');
+    assert_true(strpos($workflow, 'called.assignment_id=a.id') !== false, 'A new reassignment must be eligible once without erasing earlier call history');
     assert_true(strpos($workflow, "c.state=\\'CALLBACK\\'") !== false && strpos($workflow, "due_cb.due_at_utc<=UTC_TIMESTAMP()") !== false, 'Only due callbacks should automatically return after a call');
     assert_true(strpos($workflow, "agent_note IS NULL OR agent_note=\\'\\'") !== false, 'An idempotent outcome retry must be able to restore a note omitted by the first browser request');
+});
+
+test_case('expired untouched claims return safely to the queue', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $cleanup = file_get_contents(GC_PROJECT_ROOT . '/bin/cleanup_claims.php');
+    assert_true(strpos($workflow, 'function releaseExpiredClaims') !== false && strpos($workflow, 'CLAIM_EXPIRED') !== false, 'Expired claims must have a single audited release path');
+    assert_true(strpos($workflow, "NOT EXISTS (SELECT 1 FROM gc_attempt") !== false && strpos($workflow, 'business_outcome_id IS NULL') !== false, 'Claims with an active call or pending outcome must not be released');
+    assert_true(strpos($workflow, "\$newState = \$row['callback_due_at'] !== null ? 'CALLBACK' : 'PENDING'") !== false, 'Released clients must restore callback or pending queue state');
+    assert_true(substr_count($workflow, 'releaseExpiredClaims($tx, $agentMapId)') >= 3, 'Current, next, and reopen workflows must all clean safe expired claims for the current agent');
+    assert_true(strpos($cleanup, 'CLAIM_EXPIRED') !== false && strpos($cleanup, 'NOT EXISTS (SELECT 1 FROM gc_attempt') !== false, 'Background cleanup must preserve the same active-call and pending-outcome safeguards');
+});
+
+test_case('protected expired claim remains current and blocks claiming another client', function () {
+    gc_require_class('GestionClientesWorkflow', 'module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $db = new FakeProtectedClaimDb();
+    $workflow = new GestionClientesWorkflow($db, null, 900);
+    $client = $workflow->claimNext(7, 'agent', '127.0.0.1');
+    assert_same(44, (int)$client['id'], 'Agent must remain on the client whose expired claim is protected by unresolved work');
+    assert_true(strpos($db->existingClaimSql, 'cl.expires_at>UTC_TIMESTAMP()') === false, 'Protected claim lookup must not ignore an expired row retained for safety');
+    assert_true(!$db->insertedClaim, 'A protected claim must prevent insertion of a second client claim');
+    $workflowSource = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    assert_true(substr_count($workflowSource, 'SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE') >= 3, 'Current, next, and reopen operations must serialize claim ownership on the durable agent row');
 });
 
 test_case('non-callback outcomes are informational client metadata only', function () {
@@ -357,6 +461,61 @@ test_case('agents have an owned called-client history with guarded reopen', func
     assert_true(strpos($template, 'name="csrf_token"') !== false && strpos($template, 'name="idempotency_key"') !== false, 'Reopen must carry CSRF and idempotency controls');
 });
 
+test_case('callback lifecycle supports guarded reschedule and cancellation', function () {
+    $workflow = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesWorkflow.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/callbacks.tpl');
+    assert_true(strpos($workflow, 'function manageCallback') !== false && strpos($workflow, 'CALLBACK_OWNERSHIP_INVALID') !== false, 'Only the owning agent or supervisor may manage a callback');
+    assert_true(strpos($workflow, "CALLBACK_RESCHEDULED") !== false && strpos($workflow, "CALLBACK_CANCELED") !== false, 'Callback lifecycle changes must be audited');
+    assert_true(strpos($workflow, 'CALLBACK_CLIENT_ACTIVE') !== false, 'Active clients or calls must block callback changes');
+    assert_true(strpos($index, "\$action === 'callback_manage'") !== false && strpos($index, 'validateMutation') !== false, 'Callback mutations require a guarded endpoint');
+    assert_true(strpos($template, 'name="callback_action" value="RESCHEDULE"') !== false && strpos($template, 'name="callback_action" value="CANCEL"') !== false, 'Callback UI must expose both lifecycle actions');
+});
+
+test_case('supervisor reassignment preserves history and callback ownership safely', function () {
+    $assignment = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesAssignment.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    $template = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/themes/default/assignment_manage.tpl');
+    assert_true(strpos($assignment, 'REASSIGNMENT_CLIENT_ACTIVE') !== false && strpos($assignment, 'gc_client_claim') !== false && strpos($assignment, 'business_outcome_id IS NULL') !== false, 'Open clients, active calls, and pending outcomes must block reassignment');
+    assert_true(strpos($assignment, 'SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE') !== false, 'The destination must be an enabled agent');
+    assert_true(strpos($assignment, 'UPDATE gc_callback SET assignment_id=?') !== false, 'Open callbacks must follow the new assignment');
+    assert_true(strpos($assignment, "'CLIENT_REASSIGNED'") !== false, 'Every transfer must be audited');
+    assert_true(strpos($index, "\$action === 'assignment_manage'") !== false && strpos($index, "'assignment_reassign'") !== false, 'The supervisor route must use the standard idempotent mutation path');
+    assert_true(strpos($template, 'name="csrf_token"') !== false && strpos($template, 'name="idempotency_key"') !== false && strpos($template, 'name="reason"') !== false, 'Reassignment UI must carry CSRF, idempotency, and a reason');
+});
+
+test_case('reassignment transaction moves an open callback and rejects in-use clients', function () {
+    gc_require_class('GestionClientesAssignment', 'module/gestion_clientes/libs/GestionClientesAssignment.class.php');
+    $db = new FakeAssignmentDb();
+    $newAssignmentId = (new GestionClientesAssignment($db))->reassign(12, 8, 'supervisor', 'Cambio de turno', '127.0.0.1');
+    assert_same(99, $newAssignmentId, 'Reassignment must return the durable new assignment ID');
+    $movedCallback = false;
+    foreach ($db->executed as $statement) {
+        if (strpos($statement['sql'], 'UPDATE gc_callback SET assignment_id=?') !== false && $statement['params'] === array(99,44,12)) $movedCallback = true;
+    }
+    assert_true($movedCallback, 'Open callback must reference the new assignment in the same transaction');
+    assert_same('CLIENT_REASSIGNED', $db->audits[0]['type'], 'Successful reassignment must emit an audit event');
+
+    $blocked = new FakeAssignmentDb();
+    $blocked->hasUnresolvedAttempt = true;
+    try {
+        (new GestionClientesAssignment($blocked))->reassign(12, 8, 'supervisor', 'Cambio de turno', '127.0.0.1');
+        throw new RuntimeException('Unresolved attempt was reassigned');
+    } catch (RuntimeException $expected) {
+        assert_same('REASSIGNMENT_CLIENT_ACTIVE', $expected->getMessage(), 'Unresolved call must block reassignment');
+    }
+});
+
+test_case('production reports include agent technical and detailed CSV data', function () {
+    $stats = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/libs/GestionClientesStats.class.php');
+    $index = file_get_contents(GC_PROJECT_ROOT . '/module/gestion_clientes/index.php');
+    assert_true(strpos($stats, 'function agentPerformance') !== false && strpos($stats, 'clients_called') !== false && strpos($stats, 'talk_seconds') !== false, 'Agent report must expose operational call metrics');
+    assert_true(strpos($stats, 'function technicalBreakdown') !== false, 'Technical results must be reportable separately from business labels');
+    assert_true(strpos($stats, 'function attemptExport') !== false && strpos($stats, 'LIMIT ' . "' . \$limit") !== false, 'Detailed exports must be bounded');
+    assert_true(strpos($index, 'gc_csv_cell') !== false && strpos($index, "[=+\\-@]") !== false, 'CSV exports must neutralize spreadsheet formulas, including after leading whitespace');
+    assert_true(strpos($index, 'attempt_id,requested_at,answered_at') !== false, 'CSV export must contain call-level detail');
+});
+
 test_case('Asterisk 11 dialplan derives its compact CDR key from the attempt UUID', function () {
     $dialplan = file_get_contents(GC_PROJECT_ROOT . '/asterisk/extensions_gestion_clientes.conf');
     assert_true(strpos($dialplan, 'FILTER(0-9a-fA-F,${GC_ATTEMPT_ID})') !== false, 'Dialplan must derive the compact CDR key from the validated attempt UUID');
@@ -380,11 +539,54 @@ test_case('CDR reconciliation backs off unmatched attempts without starving newe
     assert_true(strpos($migration, 'VALUES (3, UTC_TIMESTAMP())') !== false, 'Migration 003 must be recorded in the schema ledger');
 });
 
+test_case('CDR reconciliation is bounded and operationally observable', function () {
+    $source = file_get_contents(GC_PROJECT_ROOT . '/bin/reconcile_cdr.php');
+    $schema = file_get_contents(GC_PROJECT_ROOT . '/install/schema.sql');
+    $migration = file_get_contents(GC_PROJECT_ROOT . '/install/migrations/006_production_operations.sql');
+    assert_true(strpos($source, "'max-retries:'") !== false && strpos($source, 'cdr_exhausted_at') !== false, 'Reconciliation must stop retrying permanently unmatched calls');
+    assert_true(strpos($source, "raw_error_code NOT LIKE \\'AMI_AGENT_%\\'") !== false, 'Agent-only failures must never enter customer CDR reconciliation');
+    assert_true(strpos($source, 'gc_operational_status') !== false && strpos($source, 'heartbeatCompleted') !== false, 'Every reconciler run must leave a durable success or failure heartbeat');
+    assert_true(strpos($schema, 'CREATE TABLE IF NOT EXISTS gc_operational_status') !== false, 'Fresh installations need the operational heartbeat table');
+    assert_true(strpos($migration, 'DIALPLAN_CORRELATION_REJECTED') !== false && strpos($migration, 'VALUES (6, UTC_TIMESTAMP())') !== false, 'Migration must close known no-CDR legacy failures and record schema version 6');
+    assert_true(strpos($migration, "c.state='IN_PROGRESS'") !== false && strpos($migration, 'cl.client_id IS NULL') !== false, 'Migration must repair safely identifiable clients stranded by old claim expiry behavior');
+});
+
+test_case('CDR retry delay is bounded and monotonic', function () {
+    define('GC_RECONCILE_LIBRARY_ONLY', true);
+    ob_start();
+    require_once GC_PROJECT_ROOT . '/bin/reconcile_cdr.php';
+    ob_end_clean();
+    assert_same(30, gc_cdr_retry_delay(0), 'First missing CDR retry must wait 30 seconds');
+    assert_same(60, gc_cdr_retry_delay(1), 'Second missing CDR retry must back off');
+    assert_same(3600, gc_cdr_retry_delay(99), 'Retry delay must cap at one hour');
+});
+
+test_case('production operations provide health backup and alert tooling', function () {
+    $health = file_get_contents(GC_PROJECT_ROOT . '/bin/health_check.php');
+    $backup = file_get_contents(GC_PROJECT_ROOT . '/bin/backup.sh');
+    $verify = file_get_contents(GC_PROJECT_ROOT . '/bin/verify_backup.sh');
+    $install = file_get_contents(GC_PROJECT_ROOT . '/install/install-operations.sh');
+    $cron = file_get_contents(GC_PROJECT_ROOT . '/install/gestion-clientes.cron');
+    assert_true(strpos($health, 'stale_active_attempts') !== false && strpos($health, 'exhausted_reconciliation') !== false && strpos($health, 'ambiguous_attempts') !== false && strpos($health, 'overdue_outcomes') !== false && strpos($health, 'agents_with_multiple_claims') !== false, 'Health check must surface states that can make dialing unsafe');
+    assert_true(strpos($backup, '--single-transaction') !== false && strpos($backup, 'umask 077') !== false && strpos($backup, 'MANIFEST.sha256') !== false, 'Backup must be consistent, private, and checksummed');
+    assert_true(strpos($verify, 'sha256sum -c') !== false, 'Backup verification must validate the checksum manifest');
+    assert_true(strpos($backup, ".backup '") !== false && strpos($backup, 'PRAGMA integrity_check') !== false && strpos($verify, 'PRAGMA integrity_check') !== false, 'Live Issabel SQLite files require online backup and integrity verification');
+    assert_true(strpos($backup, 'BACKUP.meta') !== false && strpos($verify, 'BACKUP.meta') !== false, 'Backup verification must use artifact metadata rather than hard-coded database options');
+    assert_true(strpos($install, '--install-cron') !== false, 'Operational installer must not replace production cron without explicit authorization');
+    assert_true(strpos($install, 'SELECT MAX(version_num) FROM gc_schema_version') !== false && strpos($install, 'version>=6') !== false, 'Operational binaries must not be published before schema migration 6');
+    assert_true(strpos($install, '/var/lib/asterisk/agi-bin/gestion-clientes-finalize-call') !== false, 'Operational installer must publish the real-time finalizer used by the approved dialplan');
+    assert_true(strpos($cron, 'gestion-clientes-health-alert') !== false && strpos($cron, 'gestion-clientes-reconcile.log') !== false, 'Cron must preserve reconciler output and emit health alerts');
+    assert_true(strpos($cron, 'gestion-clientes-cleanup-claims') !== false && strpos($cron, '/usr/bin/flock -n') !== false, 'Cron must release safe expired claims without overlapping runs');
+    $cleanup = file_get_contents(GC_PROJECT_ROOT . '/bin/cleanup_claims.php');
+    assert_true(strpos($cleanup, '/var/www/html/modules/gestion_clientes') !== false && strpos($cleanup, "dirname(__FILE__) . '/../module") === false, 'Installed cleanup must load the deployed module rather than a repository-relative path');
+});
+
 test_case('CDR reconciliation has a safe production cron definition', function () {
     $cron = file_get_contents(GC_PROJECT_ROOT . '/install/gestion-clientes.cron');
     assert_true(strpos($cron, '* * * * * root') !== false, 'CDR reconciliation must run every minute');
     assert_true(strpos($cron, '/usr/bin/flock -n') !== false, 'Concurrent reconciliation runs must be prevented');
     assert_true(strpos($cron, '--min-age 120') !== false, 'Cron must allow linked CDR legs to settle');
+    assert_true(strpos($cron, '--max-retries 10') !== false, 'Cron must enforce a bounded retry policy');
     assert_true(strpos($cron, '/usr/local/sbin/gestion-clientes-reconcile-cdr') !== false, 'Cron must use the stable production command');
 });
 
@@ -532,6 +734,9 @@ test_case('workspace uses the polished client and phone card hierarchy', functio
     assert_true(strpos($template, 'gc-outcome-fields') !== false && strpos($template, 'gc-note-field') !== false, 'Outcome and note controls must share the result panel');
     assert_true(strpos($template, 'gc-phone-tab-check') !== false, 'Selected phone tab must expose a visible selection marker');
     assert_true(strpos($css, '.gc-phone-detail .gc-phone-call-form .gc-call{border-radius:50%') !== false, 'Selected phone call action must use the compact circular treatment');
+    assert_true(strpos($css, '.gc-phone-heading .gc-section-icon,.gc-phone-main .gc-phone-icon,.gc-phone-tab .gc-phone-icon{display:none}') !== false, 'Repeated phone decoration must be hidden from the contact heading and number cards');
+    assert_true(strpos($css, '.gc-outcome-fields{display:grid;gap:14px 18px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);height:auto}') !== false, 'Outcome controls must use two columns without overlapping');
+    assert_true((bool) preg_match('/gc-note-field[\s\S]*<\/label><button type="submit"/', $template), 'The note must appear before the save action in the outcome form');
 });
 
 test_case('workspace does not display internal agent identity', function () {

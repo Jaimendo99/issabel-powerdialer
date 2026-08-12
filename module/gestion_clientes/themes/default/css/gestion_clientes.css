@@ -18,3 +18,22 @@
 /* Keep card controls inside their grid columns at Issabel's content widths. */
 .gc-phone-detail.gc-phone-detail-active{box-sizing:border-box;grid-template-columns:minmax(0,1fr) minmax(0,auto);overflow:hidden}.gc-phone-detail .gc-phone-main{grid-column:1;grid-row:1}.gc-phone-summary{grid-column:1;grid-row:2;justify-self:start}.gc-phone-detail .gc-phone-facts{grid-column:1;grid-row:3}.gc-phone-detail .gc-phone-call-form{box-sizing:border-box;grid-column:2;grid-row:1/4;justify-self:end;width:76px}.gc-phone-detail .gc-phone-call-form .gc-call{box-sizing:border-box}.gc-outcome-side,.gc-outcome-side *{box-sizing:border-box}.gc-outcome-fields{grid-template-columns:minmax(0,1fr) minmax(0,.9fr);min-width:0}.gc-outcome-choice,.gc-note-field{min-width:0}.gc-outcome-choice>button,.gc-note-field textarea{max-width:100%}
 @media(max-width:640px){.gc-phone-detail.gc-phone-detail-active{grid-template-columns:minmax(0,1fr) 68px}.gc-phone-detail .gc-phone-call-form{width:68px}.gc-phone-summary{grid-column:1;grid-row:2}.gc-phone-detail .gc-phone-facts{grid-column:1/-1;grid-row:3}.gc-outcome-fields{grid-template-columns:1fr}}
+.gc-callback-actions{align-items:flex-start;display:flex;flex-wrap:wrap;gap:7px}.gc-callback-actions form{margin:0}.gc-callback-manage{position:relative}.gc-callback-manage>summary{background:#fff;border:1px solid #7b8c94;border-radius:3px;color:#42545d;cursor:pointer;font-weight:600;list-style:none;padding:7px 13px}.gc-callback-manage>summary::-webkit-details-marker{display:none}.gc-callback-manage>.gc-form{background:#fff;border:1px solid #b7c5cc;box-shadow:0 5px 18px rgba(38,50,56,.2);min-width:310px;padding:12px;position:absolute;right:0;top:calc(100% + 5px);z-index:20}.gc-callback-manage>.gc-form label{display:block;margin-bottom:8px}.gc-callback-manage>.gc-form input,.gc-callback-manage>.gc-form textarea{width:100%}@media(max-width:640px){.gc-callback-actions{display:block}.gc-callback-actions>*{margin-bottom:7px!important}.gc-callback-actions button,.gc-callback-manage>summary{box-sizing:border-box;text-align:center;width:100%}.gc-callback-manage>.gc-form{left:0;min-width:270px;right:auto}}
+
+/* Keep the workspace compact and prevent the disposition controls from colliding. */
+.gc-workspace>.gc-heading h2{font-size:27px}
+.gc-client-title h3{font-size:22px}
+.gc-client-data h4,.gc-phone-heading h4{font-size:17px}
+.gc-phone-heading-copy{gap:0}
+.gc-phone-heading .gc-section-icon,.gc-phone-main .gc-phone-icon,.gc-phone-tab .gc-phone-icon{display:none}
+.gc-phone-detail .gc-phone-number{font-size:18px}
+.gc-phone-tab strong{font-size:14px}
+.gc-outcome-fields{display:grid;gap:14px 18px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);height:auto}
+.gc-outcome-choice{grid-column:1;grid-row:1;min-width:0}
+.gc-outcome-choice>label{font-size:15px}
+.gc-outcome-choice select{height:40px}
+.gc-outcome-fields>button{align-self:start;grid-column:1/-1;grid-row:2;margin-top:0;min-height:40px;padding:7px 18px;width:100%;max-width:360px}
+.gc-note-field{grid-column:2;grid-row:1;min-width:0}
+.gc-note-field textarea{min-height:110px;width:100%}
+@media(max-width:640px){.gc-outcome-fields{grid-template-columns:1fr}.gc-outcome-choice,.gc-note-field{grid-column:1;grid-row:auto}.gc-outcome-fields>button{grid-column:1;grid-row:auto;max-width:none}}
+.gc-reassign-form{align-items:center;display:flex;flex-wrap:wrap;gap:6px;margin:0}.gc-reassign-form select{min-width:150px}.gc-reassign-form input{min-width:150px}@media(max-width:640px){.gc-reassign-form{display:block}.gc-reassign-form select,.gc-reassign-form input,.gc-reassign-form button{box-sizing:border-box;margin-bottom:6px;width:100%}}

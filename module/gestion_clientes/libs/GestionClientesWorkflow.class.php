@@ -15,10 +15,16 @@ class GestionClientesWorkflow
 
     public function currentClient($agentMapId)
     {
-        $row = $this->db->fetchOne(
-            'SELECT c.*, a.id AS assignment_id, cl.claim_token, cl.expires_at FROM gc_client_claim cl JOIN gc_client c ON c.id=cl.client_id JOIN gc_assignment a ON a.id=cl.assignment_id WHERE cl.agent_map_id=? AND cl.expires_at>UTC_TIMESTAMP() AND a.assignment_state=\'ACTIVE\' ORDER BY cl.claimed_at DESC LIMIT 1',
-            array($agentMapId)
-        );
+        $self = $this;
+        $row = $this->db->transaction(function ($tx) use ($agentMapId, $self) {
+            $agent = $tx->fetchOne('SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE', array($agentMapId));
+            if (!$agent) throw new RuntimeException('AGENT_MAPPING_REQUIRED');
+            $self->releaseExpiredClaims($tx, $agentMapId);
+            return $tx->fetchOne(
+                'SELECT c.*, a.id AS assignment_id, cl.claim_token, cl.expires_at FROM gc_client_claim cl JOIN gc_client c ON c.id=cl.client_id JOIN gc_assignment a ON a.id=cl.assignment_id WHERE cl.agent_map_id=? AND a.assignment_state=\'ACTIVE\' ORDER BY cl.claimed_at DESC LIMIT 1',
+                array($agentMapId)
+            );
+        });
         return $row ? $this->hydrateClient($row) : null;
     }
 
@@ -27,16 +33,18 @@ class GestionClientesWorkflow
         $ttl = $this->claimTtl;
         $self = $this;
         return $this->db->transaction(function ($tx) use ($agentMapId, $actor, $ip, $ttl, $self) {
-            $tx->execute('DELETE FROM gc_client_claim WHERE expires_at<=UTC_TIMESTAMP()', array());
+            $agent = $tx->fetchOne('SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE', array($agentMapId));
+            if (!$agent) throw new RuntimeException('AGENT_MAPPING_REQUIRED');
+            $self->releaseExpiredClaims($tx, $agentMapId);
             $existing = $tx->fetchOne(
-                'SELECT c.*, a.id AS assignment_id, cl.claim_token, cl.expires_at FROM gc_client_claim cl JOIN gc_client c ON c.id=cl.client_id JOIN gc_assignment a ON a.id=cl.assignment_id WHERE cl.agent_map_id=? AND cl.expires_at>UTC_TIMESTAMP() AND a.assignment_state=\'ACTIVE\' ORDER BY cl.claimed_at DESC LIMIT 1 FOR UPDATE',
+                'SELECT c.*, a.id AS assignment_id, cl.claim_token, cl.expires_at FROM gc_client_claim cl JOIN gc_client c ON c.id=cl.client_id JOIN gc_assignment a ON a.id=cl.assignment_id WHERE cl.agent_map_id=? AND a.assignment_state=\'ACTIVE\' ORDER BY cl.claimed_at DESC LIMIT 1 FOR UPDATE',
                 array($agentMapId)
             );
             if ($existing) {
                 return $self->hydrateClient($existing);
             }
             $client = $tx->fetchOne(
-                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL AND ((c.state=\'PENDING\' AND NOT EXISTS (SELECT 1 FROM gc_attempt called WHERE called.client_id=c.id AND (called.raw_error_code IS NULL OR LEFT(called.raw_error_code,10)<>\'AMI_AGENT_\')) ) OR (c.state=\'CALLBACK\' AND EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()))) ORDER BY CASE WHEN c.state=\'CALLBACK\' THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
+                'SELECT c.*, a.id AS assignment_id FROM gc_assignment a JOIN gc_client c ON c.id=a.client_id JOIN gc_campaign camp ON camp.id=c.campaign_id AND camp.status=\'ACTIVE\' LEFT JOIN gc_client_claim cl ON cl.client_id=c.id WHERE a.agent_map_id=? AND a.assignment_state=\'ACTIVE\' AND c.terminal=0 AND cl.client_id IS NULL AND ((c.state=\'PENDING\' AND NOT EXISTS (SELECT 1 FROM gc_attempt called WHERE called.assignment_id=a.id AND (called.raw_error_code IS NULL OR LEFT(called.raw_error_code,10)<>\'AMI_AGENT_\')) ) OR (c.state=\'CALLBACK\' AND EXISTS (SELECT 1 FROM gc_callback due_cb WHERE due_cb.assignment_id=a.id AND due_cb.status=\'OPEN\' AND due_cb.due_at_utc<=UTC_TIMESTAMP()))) ORDER BY CASE WHEN c.state=\'CALLBACK\' THEN 0 ELSE 1 END, c.priority DESC, a.assigned_at ASC, c.id ASC LIMIT 1 FOR UPDATE',
                 array($agentMapId)
             );
             if (!$client) {
@@ -71,10 +79,12 @@ class GestionClientesWorkflow
                 return $existing;
             }
             $row = $tx->fetchOne(
-                'SELECT c.campaign_id,c.terminal,c.last_attempt_at AS client_last_attempt_at,a.id AS assignment_id,p.normalized_value,p.state AS phone_state,p.attempt_count AS phone_attempt_count,p.last_attempt_at AS phone_last_attempt_at FROM gc_client c JOIN gc_assignment a ON a.client_id=c.id AND a.assignment_state=\'ACTIVE\' JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.assignment_id=a.id JOIN gc_client_phone p ON p.client_id=c.id WHERE c.id=? AND p.id=? AND a.agent_map_id=? AND cl.claim_token=? AND cl.expires_at>UTC_TIMESTAMP() FOR UPDATE',
+                'SELECT c.campaign_id,c.terminal,c.last_attempt_at AS client_last_attempt_at,a.id AS assignment_id,p.normalized_value,p.state AS phone_state,p.attempt_count AS phone_attempt_count,p.last_attempt_at AS phone_last_attempt_at FROM gc_client c JOIN gc_campaign camp ON camp.id=c.campaign_id AND camp.status=\'ACTIVE\' JOIN gc_assignment a ON a.client_id=c.id AND a.assignment_state=\'ACTIVE\' JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.assignment_id=a.id JOIN gc_client_phone p ON p.client_id=c.id WHERE c.id=? AND p.id=? AND a.agent_map_id=? AND cl.claim_token=? AND cl.expires_at>UTC_TIMESTAMP() FOR UPDATE',
                 array($clientId, $phoneId, $agent['id'], $claimToken)
             );
             if (!$row || (int)$row['terminal'] === 1) {
+                $campaign = $tx->fetchOne('SELECT camp.status FROM gc_client c JOIN gc_campaign camp ON camp.id=c.campaign_id WHERE c.id=? FOR UPDATE', array($clientId));
+                if ($campaign && $campaign['status'] !== 'ACTIVE') throw new RuntimeException('CAMPAIGN_NOT_ACTIVE');
                 throw new RuntimeException('CALL_OWNERSHIP_INVALID');
             }
             if (in_array($row['phone_state'], array('INVALID','DO_NOT_CALL'), true)) {
@@ -255,7 +265,7 @@ class GestionClientesWorkflow
             . ' JOIN gc_campaign camp ON camp.id=c.campaign_id JOIN gc_client_phone p ON p.id=at.phone_id'
             . ' JOIN gc_assignment hist ON hist.id=at.assignment_id'
             . ' LEFT JOIN gc_assignment active ON active.client_id=c.id AND active.assignment_state=\'ACTIVE\''
-            . ' LEFT JOIN gc_client_claim cl ON cl.client_id=c.id AND cl.expires_at>UTC_TIMESTAMP()'
+            . ' LEFT JOIN gc_client_claim cl ON cl.client_id=c.id'
             . ' LEFT JOIN gc_outcome o ON o.id=at.business_outcome_id'
             . ' LEFT JOIN gc_callback cb ON cb.id=(SELECT MAX(cb2.id) FROM gc_callback cb2 WHERE cb2.client_id=c.id AND cb2.status=\'OPEN\')'
             . ' ORDER BY at.requested_at DESC,at.id DESC LIMIT ' . $limit,
@@ -269,11 +279,52 @@ class GestionClientesWorkflow
         return $rows;
     }
 
+    public function manageCallback($callbackId, $agentMapId, $supervisor, $action, $dueAt, $timezone, $note, $actor, $ip)
+    {
+        $callbackId = (int)$callbackId;
+        $action = strtoupper(trim((string)$action));
+        if ($callbackId < 1 || !in_array($action, array('RESCHEDULE','CANCEL'), true)) {
+            throw new InvalidArgumentException('CALLBACK_ACTION_INVALID');
+        }
+        $db = $this->db;
+        return $db->transaction(function ($tx) use ($callbackId, $agentMapId, $supervisor, $action, $dueAt, $timezone, $note, $actor, $ip) {
+            $callback = $tx->fetchOne(
+                'SELECT cb.*,a.agent_map_id,c.state AS client_state FROM gc_callback cb JOIN gc_assignment a ON a.id=cb.assignment_id JOIN gc_client c ON c.id=cb.client_id WHERE cb.id=? FOR UPDATE',
+                array($callbackId)
+            );
+            if (!$callback || $callback['status'] !== 'OPEN') throw new RuntimeException('CALLBACK_NOT_OPEN');
+            if (!$supervisor && (int)$callback['agent_map_id'] !== (int)$agentMapId) throw new RuntimeException('CALLBACK_OWNERSHIP_INVALID');
+            $activeAttempt = $tx->fetchOne('SELECT id FROM gc_attempt WHERE assignment_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\') LIMIT 1 FOR UPDATE', array($callback['assignment_id']));
+            if ($activeAttempt) throw new RuntimeException('CALLBACK_CLIENT_ACTIVE');
+            $activeClaim = $tx->fetchOne('SELECT agent_map_id FROM gc_client_claim WHERE client_id=? FOR UPDATE', array($callback['client_id']));
+            if ($activeClaim) throw new RuntimeException('CALLBACK_CLIENT_ACTIVE');
+
+            if ($action === 'RESCHEDULE') {
+                $note = trim((string)$note);
+                if ($note === '' || strlen($note) > 2000) throw new InvalidArgumentException('CALLBACK_NOTE_INVALID');
+                $dueUtc = GestionClientesValidator::localToUtc($dueAt, $timezone);
+                if (strtotime($dueUtc . ' UTC') <= time()) throw new InvalidArgumentException('CALLBACK_MUST_BE_FUTURE');
+                $tx->execute('UPDATE gc_callback SET due_at_utc=?,timezone=?,note=? WHERE id=? AND status=\'OPEN\'', array($dueUtc, $timezone, $note, $callbackId));
+                $tx->execute('UPDATE gc_client SET state=\'CALLBACK\',terminal=0,next_action_at=?,updated_at=UTC_TIMESTAMP(),row_version=row_version+1 WHERE id=?', array($dueUtc, $callback['client_id']));
+                $tx->audit($callback['client_id'], $actor, 'CALLBACK_RESCHEDULED', $callback['client_state'], 'CALLBACK', array('callback_id'=>$callbackId,'due_at_utc'=>$dueUtc), $ip);
+                return array('callback_id'=>$callbackId,'status'=>'OPEN','due_at_utc'=>$dueUtc);
+            }
+
+            $tx->execute('UPDATE gc_callback SET status=\'CANCELED\',canceled_at=UTC_TIMESTAMP() WHERE id=? AND status=\'OPEN\'', array($callbackId));
+            $tx->execute('UPDATE gc_client SET state=\'PENDING\',terminal=0,next_action_at=NULL,updated_at=UTC_TIMESTAMP(),row_version=row_version+1 WHERE id=?', array($callback['client_id']));
+            $tx->audit($callback['client_id'], $actor, 'CALLBACK_CANCELED', $callback['client_state'], 'PENDING', array('callback_id'=>$callbackId), $ip);
+            return array('callback_id'=>$callbackId,'status'=>'CANCELED');
+        });
+    }
+
     public function reopenClient($agentMapId, $clientId, $actor, $ip)
     {
         $ttl = $this->claimTtl;
-        return $this->db->transaction(function ($tx) use ($agentMapId, $clientId, $actor, $ip, $ttl) {
-            $tx->execute('DELETE FROM gc_client_claim WHERE expires_at<=UTC_TIMESTAMP()', array());
+        $self = $this;
+        return $this->db->transaction(function ($tx) use ($agentMapId, $clientId, $actor, $ip, $ttl, $self) {
+            $agent = $tx->fetchOne('SELECT id FROM gc_agent_map WHERE id=? AND active=1 FOR UPDATE', array($agentMapId));
+            if (!$agent) throw new RuntimeException('AGENT_MAPPING_REQUIRED');
+            $self->releaseExpiredClaims($tx, $agentMapId);
             $history = $tx->fetchOne('SELECT id FROM gc_attempt WHERE client_id=? AND agent_map_id=? AND (raw_error_code IS NULL OR LEFT(raw_error_code,10)<>\'AMI_AGENT_\') LIMIT 1', array($clientId, $agentMapId));
             if (!$history) throw new RuntimeException('CLIENT_HISTORY_REQUIRED');
             $activeAttempt = $tx->fetchOne('SELECT id FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NULL AND technical_state IN (\'CREATED\',\'ORIGINATED\',\'RINGING\',\'ANSWERED\',\'AMBIGUOUS\') LIMIT 1', array($agentMapId));
@@ -281,7 +332,7 @@ class GestionClientesWorkflow
             $latestFinished = $tx->fetchOne('SELECT id,business_outcome_id,raw_error_code FROM gc_attempt WHERE agent_map_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1', array($agentMapId));
             $agentOnlyFailure = $latestFinished && strpos((string)$latestFinished['raw_error_code'], 'AMI_AGENT_') === 0;
             if ($latestFinished && $latestFinished['business_outcome_id'] === null && !$agentOnlyFailure) throw new RuntimeException('OUTCOME_REQUIRED_BEFORE_CALL');
-            $current = $tx->fetchOne('SELECT client_id FROM gc_client_claim WHERE agent_map_id=? AND expires_at>UTC_TIMESTAMP() LIMIT 1 FOR UPDATE', array($agentMapId));
+            $current = $tx->fetchOne('SELECT client_id FROM gc_client_claim WHERE agent_map_id=? LIMIT 1 FOR UPDATE', array($agentMapId));
             if ($current && (int)$current['client_id'] !== (int)$clientId) throw new RuntimeException('CURRENT_CLIENT_EXISTS');
 
             $client = $tx->fetchOne('SELECT id,state,terminal FROM gc_client WHERE id=? FOR UPDATE', array($clientId));
@@ -303,6 +354,24 @@ class GestionClientesWorkflow
             $tx->audit($clientId, $actor, 'CLIENT_REOPENED', $client['state'], 'IN_PROGRESS', array('assignment_id'=>(int)$assignment['id']), $ip);
             return array('client_id'=>(int)$clientId, 'claim_token'=>$token);
         });
+    }
+
+    private function releaseExpiredClaims($tx, $agentMapId)
+    {
+        $expired = $tx->fetchAll(
+            'SELECT cl.client_id,c.state,(SELECT MIN(cb.due_at_utc) FROM gc_callback cb WHERE cb.client_id=cl.client_id AND cb.status=\'OPEN\') AS callback_due_at'
+            . ' FROM gc_client_claim cl JOIN gc_client c ON c.id=cl.client_id WHERE cl.agent_map_id=? AND cl.expires_at<=UTC_TIMESTAMP()'
+            . ' AND NOT EXISTS (SELECT 1 FROM gc_attempt at WHERE at.assignment_id=cl.assignment_id AND (at.ended_at IS NULL OR (at.business_outcome_id IS NULL AND (at.raw_error_code IS NULL OR at.raw_error_code NOT LIKE \'AMI_AGENT_%\'))))'
+            . ' FOR UPDATE',
+            array($agentMapId)
+        );
+        foreach ($expired as $row) {
+            $newState = $row['callback_due_at'] !== null ? 'CALLBACK' : 'PENDING';
+            $tx->execute('UPDATE gc_client SET state=?,next_action_at=?,updated_at=UTC_TIMESTAMP(),row_version=row_version+1 WHERE id=? AND terminal=0', array($newState, $row['callback_due_at'], $row['client_id']));
+            $tx->execute('DELETE FROM gc_client_claim WHERE client_id=? AND expires_at<=UTC_TIMESTAMP()', array($row['client_id']));
+            $tx->audit($row['client_id'], 'system', 'CLAIM_EXPIRED', $row['state'], $newState, array(), null);
+        }
+        return count($expired);
     }
 
     private function hydrateClient($row)

@@ -77,7 +77,7 @@ for sqlite_db in "$ISSABEL_DB_DIR"/*.db; do
   [ -f "$sqlite_db" ] || continue
   sqlite_name=$(basename "$sqlite_db")
   case "$sqlite_name" in ''|*[!A-Za-z0-9_.-]*) echo "Unsafe SQLite database name: $sqlite_name" >&2; exit 1 ;; esac
-  (cd "$BACKUP_DIR/issabel" && sqlite3 "$sqlite_db" ".timeout 5000" ".backup '$sqlite_name'")
+  (cd "$BACKUP_DIR/issabel" && printf ".timeout 5000\n.backup '%s'\n" "$sqlite_name" | sqlite3 "$sqlite_db")
   integrity=$(sqlite3 "$BACKUP_DIR/issabel/$sqlite_name" 'PRAGMA integrity_check;')
   [ "$integrity" = "ok" ] || { echo "SQLite integrity check failed: $sqlite_name" >&2; exit 1; }
   sqlite_count=$((sqlite_count + 1))
